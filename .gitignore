@@ -43,18 +43,18 @@ test-driver
 gen-ctl-io
 ctl-io.c
 ctl-io.h
-libctl/ctl-io.cpp
-libctl/ctl-io.i
-libctl/geom.cpp
-libctl/main.cpp
-libctl/meep
-libctl/meep-enums.scm
-libctl/meep.scm
-libctl/meep_enum_renames.i
-libctl/meep_renames.i
-libctl/meep_swig_bug_workaround.i
-libctl/meep_wrap.cxx
-libctl/meep_wrap.cxx.orig
+scheme/ctl-io.cpp
+scheme/ctl-io.i
+scheme/geom.cpp
+scheme/main.cpp
+scheme/meep
+scheme/meep-enums.scm
+scheme/meep.scm
+scheme/meep_enum_renames.i
+scheme/meep_renames.i
+scheme/meep_swig_bug_workaround.i
+scheme/meep_wrap.cxx
+scheme/meep_wrap.cxx.orig
 meep-pkgconfig
 meep.pc
 build/
@@ -65,6 +65,8 @@ python/meep/
 python/meep-python.cpp
 python/meep.py
 python/__init__.py
+python/mpb-python.cpp
+python/mpb.py
 
 # test programs
 tests/2D_convergence
@@ -91,11 +93,16 @@ tests/three_d
 tests/two_dimensional
 tests/*.trs
 tests/*.log
+tests/*.h5
 tests/latest_output
 
 # libmeepgeom tests
 libmeepgeom/bend-flux-ll
 libmeepgeom/pw-source-ll
+libmeepgeom/absorber-1d-ll
+libmeepgeom/array-slice-ll
+libmeepgeom/cyl-ellipsoid-ll
+libmeepgeom/wvg-taper
 libmeepgeom/ring-ll
 libmeepgeom/*.log
 libmeepgeom/*.trs
@@ -107,6 +114,7 @@ python/tests/*.trs
 python/examples/*.trs
 python/*.h5
 python/*.log
+python/*.bak
 
 # output files
 examples/*.h5

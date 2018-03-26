@@ -1,6 +1,10 @@
-language: cpp
+language: python
 dist: trusty
 sudo: false
+
+##################################################
+# required linux packages and python packages
+##################################################
 addons:
   apt:
     packages:
@@ -8,30 +12,66 @@ addons:
     - libgsl0-dev
     - libfftw3-dev
     - gfortran
-    - libhdf5-serial-dev
     - liblapack-dev
-    - python-numpy
     - swig
+    - libhdf5-serial-dev
+    - libopenmpi-dev
+    - mpi-default-bin
+    - openmpi-bin
+install:
+  - pip install numpy mpi4py h5py scipy
+
+##################################################
+# environment variables applied to all build cases
+##################################################
+env:
+  global:
+  - CPPFLAGS=-I${HOME}/local/include LDFLAGS=-L${HOME}/local/lib GEN_CTL_IO=${HOME}/local/bin/gen-ctl-io
+  - CORETESTS1="known_results symmetry bragg_transmission one_dimensional integrate convergence_cyl_waveguide aniso_disp harmonics stress_tensor near2far"
+  - CORETESTS2="h5test three_d bench flux cylindrical two_dimensional physical 2D_convergence pml"
+
+##################################################
+# common installations performed before all build cases
+##################################################
 before_script:
-  - wget https://repo.continuum.io/miniconda/Miniconda3-4.3.14-Linux-x86_64.sh
-  - bash Miniconda3-4.3.14-Linux-x86_64.sh -b -p ${HOME}/miniconda3
-  - ${HOME}/miniconda3/bin/conda install -y numpy
-script:
-  - set -e
   - git clone https://github.com/stevengj/libctl libctl-src
-  - (cd libctl-src && git checkout master && sh autogen.sh --prefix=$HOME/local --enable-shared && make && make install)
+  - (cd libctl-src && git checkout master && sh autogen.sh --prefix=$HOME/local --enable-shared && make -j 2 && make install)
   - git clone https://github.com/stevengj/harminv
-  - (cd harminv && git checkout c221b2bcbaaa761f683aa5e2c6fa7efbbecdca1f && sh autogen.sh --prefix=$HOME/local --enable-shared && make && make install)
+  - (cd harminv && git checkout c221b2bcbaaa761f683aa5e2c6fa7efbbecdca1f && sh autogen.sh --prefix=$HOME/local --enable-shared && make -j 2 && make install)
+  - git clone https://github.com/stevengj/mpb
+  - (cd mpb && git checkout master && sh autogen.sh --prefix=$HOME/local --enable-shared LIBS=-ldl --with-libctl=$HOME/local/share/libctl --with-hermitian-eps && make -j 2 && make install)
+
+##################################################
+# build matrix:
+##################################################
+matrix:
+  include:
+  - python: "2.7"
+    env: MPICONF="--without-mpi" CORETESTS="${CORETESTS1}" MKCHECKFLAGS="-j 2"
+  - python: "2.7"
+    env: MPICONF="--with-mpi"    CORETESTS="${CORETESTS1}" MKCHECKFLAGS=""
+  - python: "3.4"
+    env: MPICONF="--without-mpi" CORETESTS="${CORETESTS2}" MKCHECKFLAGS="-j 2"
+  - python: "3.4"
+    env: MPICONF="--with-mpi"    CORETESTS="${CORETESTS2}" MKCHECKFLAGS=""
+
+##################################################
+# build/test instructions
+##################################################
+script:
   - autoreconf --verbose --install --symlink --force
-  - mkdir build && pushd build
-  - (CPPFLAGS=-I${HOME}/local/include LDFLAGS=-L${HOME}/local/lib GEN_CTL_IO=${HOME}/local/bin/gen-ctl-io ../configure --enable-maintainer-mode --prefix=$HOME/local --with-libctl=$HOME/local/share/libctl --with-python && make && make check && make install)
-  - popd
-  # Build and test pymeep with python 3.6
-  - mkdir build3 && pushd build3
-  - (CPPFLAGS=-I${HOME}/local/include LDFLAGS=-L${HOME}/local/lib GEN_CTL_IO=${HOME}/local/bin/gen-ctl-io PYTHON=${HOME}/miniconda3/bin/python ../configure --enable-maintainer-mode --prefix=$HOME/local --with-libctl=$HOME/local/share/libctl --with-python && make)
-  - pushd python && make check && make install
-  - popd
-after_failure:
-  - test -r test-suite.log && cat test-suite.log
-  - test -r tests/test-suite.log && cat tests/test-suite.log
-  - test -r python/test-suite.log && cat python/test-suite.log
+  - export MEEP_VERSION=$(./configure -V | grep meep | awk '{print $3}')
+  - mkdir -p build && pushd build
+  - ../configure --enable-maintainer-mode --prefix=$HOME/local --with-libctl=$HOME/local/share/libctl ${MPICONF}
+  - make ${MKCHECKFLAGS} distcheck DISTCHECK_CONFIGURE_FLAGS="--with-libctl=${HOME}/local/share/libctl ${MPICONF}"
+
+after_script:
+  - BUILD_PREFIX=${TRAVIS_BUILD_DIR}/build/meep-${MEEP_VERSION}/_build
+  - MEEP_LOG=${BUILD_PREFIX}/tests/test-suite.log
+  - if [[ -e ${MEEP_LOG} ]]; then cat ${MEEP_LOG}; fi
+  - MEEPGEOM_LOG=${BUILD_PREFIX}/libmeepgeom/test-suite.log
+  - if [[ -e ${MEEPGEOM_LOG} ]]; then cat ${MEEPGEOM_LOG}; fi
+  - PYMPB_LOG=${BUILD_PREFIX}/libpympb/tests/test-suite.log
+  - if [[ -e ${PYMPB_LOG} ]]; then cat ${PYMPB_LOG}; fi
+  - PYTHON_LOG=${BUILD_PREFIX}/python/test-suite.log
+  - if [[ -e ${PYTHON_LOG} ]]; then cat ${PYTHON_LOG}; fi

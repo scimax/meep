@@ -75,7 +75,7 @@ In this section we calculate the Casimir force in the two-dimensional Casimir pi
 ![](../images/Dblocks-config.jpg)
 </center>
 
-This is described in this [sample file](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl). The dashed red lines indicate the surface $S$. This system consists of two metal $a\times a$ squares in between metallic sidewalls. To run a simulation in which the blocks are (nondispersive) dielectrics one can simply change their materials in the definitions as in a normal Meep simulation. For dispersive dielectrics a few extra steps are needed, which is discussed in a later section.
+This is described in [rod-plates.ctl](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl). The dashed red lines indicate the surface $S$. This system consists of two metal $a\times a$ squares in between metallic sidewalls. To run a simulation in which the blocks are (nondispersive) dielectrics one can simply change their materials in the definitions as in a normal Meep simulation. For dispersive dielectrics a few extra steps are needed, which is discussed in a later section.
 
 First define the geometry, consisting of the two metal sidewalls (each 2 pixels thick) and the two blocks:
 
@@ -125,13 +125,11 @@ As discussed in Part I, the optimal value of $\sigma$ depends on the system unde
  (define-param T 20)  
 ```
 
-
 The only thing left to define is the function $g(-t)$. This is done with the Meep function `(make-casimir-g` `T` `dt` `Sigma` `ft)`:
 
 ```
  (define gt (make-casimir-g T (/ Courant resolution) Sigma Ex))
 ```
-
 
 Here we can pass in either field type Ex or Hx. Since the E/H fields are defined for integer/half-integer units of the time step dt, we technically require a different $g(t)$ for both polarizations, and this option is allowed. However, for this example we get sufficient accuracy by using the same function for all polarizations.
 
@@ -173,7 +171,7 @@ Computing the Casimir force involves running several independent Meep simulation
  (define n-list (if (eq? n-max 0) (list 0) (interpolate (- n-max 1) (list 0 n-max))))    ;number of terms in source sum
 ```
 
-For each value of n, side number, and polarization, we run a short meep simulation. For convenience, the source construction, simulation, and field integration are all taken care of by the Scheme function `casimir-force-contrib`, defined in "/libctl/casimir.scm" (included in the Meep-1.1 release):
+For each value of n, side number, and polarization, we run a short meep simulation. For convenience, the source construction, simulation, and field integration are all taken care of by the Scheme function `casimir-force-contrib`, defined in [/scheme/casimir.scm](https://github.com/stevengj/meep/blob/master/scheme/casimir.scm):
 
 ```scm
  (casimir-force-contrib force-direction integration-vol N Sigma T source-component gt)
@@ -247,9 +245,9 @@ Parallelization
 
 If you look at the example file rods-plates.ctl ([3](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl)), you'll notice that the parameter lists are handled very differently than in the example given above. This is because it has been written in a way to take the most advantage of parallel computation.
 
-Each Casimir force calculation requires many different, very short Meep simulations. For this type of computation, it is most efficient when running on a cluster to let each individual processor handle a subset of these simulations, rather than dividing up every simulation among the entire cluster (the default behavior for meep-mpi). This way the speedup is almost exactly linear in the number of processors used. All of the functions used below are defined in the file parallel.scm ([4](http://ab-initio.mit.edu/~mccauley/casimir-examples/parallel.scm)), which should be included in the header of any ctl file using them.
+Each Casimir force calculation requires many different, very short Meep simulations. For this type of computation, it is most efficient when running on a cluster to let each individual processor handle a subset of these simulations, rather than dividing up every simulation among the entire cluster (the default behavior for the MPI version of Meep). This way the speedup is almost exactly linear in the number of processors used. All of the functions used below are defined in the file parallel.scm ([4](http://ab-initio.mit.edu/~mccauley/casimir-examples/parallel.scm)), which should be included in the header of any ctl file using them.
 
-Our strategy (shown in rods-plates.ctl ([5](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl))) is as follows: each Casimir force calculation has a set of "internal" indices, each of which denotes a separate simulation. The sum of the results from all of these simulations gives the actual force. In our example (as in most examples), the internal indices are the source polarization, the list of sides for the source surface, and the harmonic moments $n$:
+Our strategy (shown in [rods-plates.ctl](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl) is as follows: each Casimir force calculation has a set of "internal" indices, each of which denotes a separate simulation. The sum of the results from all of these simulations gives the actual force. In our example (as in most examples), the internal indices are the source polarization, the list of sides for the source surface, and the harmonic moments $n$:
 
 ```scm
  (define pol-list (list Ex Ey Ez Hx Hy Hz)) ;source polarizations
@@ -385,7 +383,7 @@ $\epsilon (\xi) = \epsilon_f + \frac{C \xi_0^2}{\omega_0^2 - \xi^2 - i\sigma \xi
 
 So the new dispersion is a Lorentzian, but with an additional loss term. This is the correct material to define in Meep.
 
-It is easy to define a dispersive material in Meep (discussed further in [Materials](../Materials.md), with examples in [Scheme Tutorials/Material Dispersion](../Scheme_Tutorials/Material_Dispersion.md)). Here is how we go about it (further material examples are defined in [materials.scm](http://ab-initio.mit.edu/~mccauley/casimir-examples/materials.scm), and [rods-plates.ctl](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl) demonstrates their use).
+It is easy to define a dispersive material in Meep (discussed further in [Materials](../Materials.md), with examples in [Tutorial/Material Dispersion](Material_Dispersion). Here is how we go about it (further material examples are defined in [materials.scm](http://ab-initio.mit.edu/~mccauley/casimir-examples/materials.scm), and [rods-plates.ctl](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl) demonstrates their use).
 
 ```scm
  (define length-scale 1e-6) ;length scale - units of 1 micron
@@ -412,7 +410,7 @@ An example geometry in 3d which is $z$-invariant is shown below:
 ![](../images/Extruded-blocks.jpg)
 </center>
 
-This example is also treated in the [sample file](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl). Now there is another parameter in the fields, $k_z$, the out-of-plane wavevector component of the fields. The field dependence is now of the form $\mathbf{E}(x,y,z) = \mathbf{E}(x,y) e^{i\pi k_z z}$. Consequently, an integral over the stress tensor will involve an integral over $k_z$, where for each $k_z$, the green's function can be determined by a two-dimensional computation. Each two-dimensional computation gives a force $\mathbf{F}^{2D}(k_z)$, and the total force is expressed as an integral:
+This example is also treated in the [rods-plates.ctl](http://ab-initio.mit.edu/~mccauley/casimir-examples/rods-plates.ctl). Now there is another parameter in the fields, $k_z$, the out-of-plane wavevector component of the fields. The field dependence is now of the form $\mathbf{E}(x,y,z) = \mathbf{E}(x,y) e^{i\pi k_z z}$. Consequently, an integral over the stress tensor will involve an integral over $k_z$, where for each $k_z$, the green's function can be determined by a two-dimensional computation. Each two-dimensional computation gives a force $\mathbf{F}^{2D}(k_z)$, and the total force is expressed as an integral:
 
 $$\mathbf{F}^{3D} = \int_0^\infty dk_z F^{2D}(k_z)$$
 
@@ -494,7 +492,7 @@ In general, for $m > 1$, the $e^{im\phi}$ field dependence will give rise to sho
 Example: Three-Dimensional Periodic Systems
 -------------------------------------------
 
-Three-dimensional periodic systems are another example of systems that can be easily analyzed with Meep. In this example, we consider the Casimir force between a periodic array of dielectric spheres and a metallic plate, shown below and simulated in periodic-sphere-plate.ctl ([9](http://ab-initio.mit.edu/~mccauley/casimir-examples/periodic-sphere-plate.ctl)):
+Three-dimensional periodic systems are another example of systems that can be easily analyzed with Meep. In this example, we consider the Casimir force between a periodic array of dielectric spheres and a metallic plate, shown below and simulated in [periodic-sphere-plate.ctl](http://ab-initio.mit.edu/~mccauley/casimir-examples/periodic-sphere-plate.ctl):
 
 <center>
 ![](../images/Spheres-plane.jpg)

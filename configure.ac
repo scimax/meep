@@ -1,14 +1,14 @@
 # Process this file with autoconf to produce a configure script.
-AC_INIT(meep, 1.3, meep@ab-initio.mit.edu)
+AC_INIT(meep, 1.4.3, meep@ab-initio.mit.edu)
 AC_CONFIG_SRCDIR(src/step.cpp)
 
 # Shared-library version number; indicates api compatibility, and is
 # not the same as the "public" version number.  (Don't worry about this
 # except for public releases.) Note that any change to a C++ class
 # definition (in the .hpp file) generally breaks binary compatibility.
-SHARED_VERSION_INFO="8:0:0" # CURRENT:REVISION:AGE
+SHARED_VERSION_INFO="9:3:0" # CURRENT:REVISION:AGE
 
-AM_INIT_AUTOMAKE([foreign check-news color-tests parallel-tests silent-rules 1.11])
+AM_INIT_AUTOMAKE([foreign color-tests parallel-tests silent-rules 1.11])
 AM_SILENT_RULES(yes)
 AM_CONFIG_HEADER(config.h)
 AC_CONFIG_MACRO_DIR([m4])
@@ -16,8 +16,6 @@ AM_MAINTAINER_MODE
 AC_SUBST(SHARED_VERSION_INFO)
 # need shared libraries for python interfaces
 AC_ENABLE_SHARED
-
-MEEP_SUFFIX=""
 
 ##############################################################################
 
@@ -33,7 +31,6 @@ AC_ARG_WITH(mpi, [AC_HELP_STRING([--with-mpi],[enable MPI parallelization])],
 if test "x$with_mpi" = "xyes"; then
   ACX_MPI([],[AC_MSG_ERROR([could not find mpi library for --with-mpi])])
   CXX=$MPICXX
-  MEEP_SUFFIX="${MEEP_SUFFIX}_mpi"
 
   # Detect stupid MPICH problem with SEEK_SET conflicting between
   # the mpi.h header file and the stdio.h header file in C++
@@ -54,9 +51,9 @@ if test "x$with_mpi" = "xyes"; then
 #undef SEEK_SET
 #undef SEEK_END
 #undef SEEK_CUR
-#include <mpi.h>], [], 
+#include <mpi.h>], [],
 	 [AC_MSG_RESULT(yes)
-          AC_DEFINE([NEED_UNDEF_SEEK_FOR_MPI], 1, [Define if mpi.h needs SEEK macros to be undefined])], 
+          AC_DEFINE([NEED_UNDEF_SEEK_FOR_MPI], 1, [Define if mpi.h needs SEEK macros to be undefined])],
 	 [AC_MSG_RESULT(no)
           AC_MSG_ERROR([can't include stdio.h and mpi.h in same file])])
   fi
@@ -68,7 +65,7 @@ fi
 # Pick "good" compiler flags(?)
 AX_CXX_MAXOPT
 
-AC_ARG_ENABLE(debug, 
+AC_ARG_ENABLE(debug,
               [AC_HELP_STRING([--enable-debug],[compile for debugging])],
 	      enable_debug=$enableval, enable_debug=no)
 if test "$enable_debug" = "yes"; then
@@ -175,12 +172,14 @@ if test $have_mpb = maybe; then
        AC_MSG_WARN([BLAS/LAPACK needed for MPB])
   fi
   AC_CHECK_LIB(mpb, maxwell_target_operator1, [have_mpb=yes; LIBS="-lmpb $LIBS"],
-               [AC_CHECK_LIB(mpb, maxwell_target_operator1, 
+               [AC_CHECK_LIB(mpb, maxwell_target_operator1,
                    [have_mpb=yes; LIBS="-lmpb $LAPACK_LIBS $BLAS_LIBS $LIBS $FLIBS"], [AC_MSG_WARN([MPB support is disabled])], [$LAPACK_LIBS $BLAS_LIBS $FLIBS])])
   if test $have_mpb = yes; then
      AC_DEFINE([HAVE_MPB], [1], [Define if you have libmpb])
   fi
 fi
+
+AM_CONDITIONAL(WITH_MPB, test "x$have_mpb" = "xyes")
 
 ##############################################################################
 # GNU Scientific Library
@@ -219,9 +218,11 @@ fi
 RUNCODE=""
 if test "x$with_mpi" = "xyes"; then
    AC_CHECK_PROG(MPIRUN, mpirun, mpirun)
-   RUNCODE="$MPIRUN -np 4" # always use 4 processes for 'make check'
+   # always use 2 processes for 'make check'
+   RUNCODE="$MPIRUN -np 2"
 fi
 AC_SUBST(RUNCODE)
+AM_CONDITIONAL(WITH_MPI, test "x$with_mpi" = "xyes")
 
 ##############################################################################
 # Libraries and flags (other than -lmeep) required to link Meep:
@@ -230,9 +231,6 @@ MEEPLIBS="$LDFLAGS $LIBS"
 AC_SUBST(MEEPLIBS)
 
 ##############################################################################
-
-# subsequent libraries are only for libctl front end
-meep_save_LIBS=$LIBS
 
 AC_ARG_WITH(libctl, [AC_HELP_STRING([--with-libctl=<dir>],[specify libctl directory])], with_libctl=$withval, with_libctl=yes)
 if test "x$with_libctl" = "xno"; then
@@ -248,22 +246,29 @@ AM_CONDITIONAL(WITH_LIBCTL, test "x$with_libctl" != xno)
 
 if test "x$with_libctl" != xno; then
 
+save_LIBS=$LIBS
+save_CPPFLAGS=$CPPFLAGS
+
 AC_CHECK_PROG(GUILE_CONFIG, guile-config, guile-config, unknown)
 if test "x$GUILE_CONFIG" = "xunknown"; then
-        AC_CHECK_LIB(readline, readline)
-        AC_CHECK_LIB(dl, dlopen)
-        AC_CHECK_LIB(guile-ltdl, scm_lt_dlinit, [], [AC_CHECK_LIB(ltdl, dlopen)])
-        AC_CHECK_LIB(guile, gh_eval_str, [],
-                     [AC_CHECK_LIB(guile, scm_eval_string, [],
-		         [AC_MSG_ERROR([linking to guile failed])])])
+  AC_CHECK_LIB(readline, readline)
+  AC_CHECK_LIB(dl, dlopen)
+  AC_CHECK_LIB(guile-ltdl, scm_lt_dlinit, [], [AC_CHECK_LIB(ltdl, dlopen)])
+  AC_CHECK_LIB(guile, gh_eval_str, [],
+    [AC_CHECK_LIB(guile, scm_eval_string, [],
+    [AC_MSG_ERROR([linking to guile failed])])])
+  GUILE_LIBS="-lguile -lguile-ltdl -lreadline"
+  GUILE_CPPFLAGS=""
 else
-        CPPFLAGS="$CPPFLAGS `$GUILE_CONFIG compile`"
-        LIBS="`$GUILE_CONFIG link` $LIBS"
-	AC_MSG_CHECKING([if linking to guile works])
-	AC_TRY_LINK_FUNC(gh_enter, AC_MSG_RESULT(yes),
- 	  [AC_TRY_LINK_FUNC(scm_boot_guile, AC_MSG_RESULT(yes),
-            [AC_MSG_RESULT(no)
-             AC_MSG_ERROR([guile-config is broken])])])
+  GUILE_LIBS=`$GUILE_CONFIG link`
+  GUILE_CPPFLAGS=`$GUILE_CONFIG compile`
+  CPPFLAGS="$CPPFLAGS $GUILE_CPPFLAGS"
+  LIBS="$GUILE_LIBS $LIBS"
+  AC_MSG_CHECKING([if linking to guile works])
+  AC_TRY_LINK_FUNC(gh_enter, AC_MSG_RESULT(yes),
+    [AC_TRY_LINK_FUNC(scm_boot_guile, AC_MSG_RESULT(yes),
+    [AC_MSG_RESULT(no)
+     AC_MSG_ERROR([guile-config is broken])])])
 fi
 AC_CHECK_HEADERS([libguile.h guile/gh.h])
 
@@ -320,12 +325,22 @@ fi
 fi
 AC_SUBST(ACTIVATE_READLINE)
 
+AC_SUBST(GUILE_LIBS)
+AC_SUBST(GUILE_CPPFLAGS)
+LIBS=$save_LIBS
+CPPFLAGS=$save_CPPFLAGS
+
 fi # if with_libctl
 
 ##############################################################################
 # Check for libctl library and files
 
 if test "x$with_libctl" != xno; then
+
+save_LIBS=$LIBS
+save_CPPFLAGS=$CPPFLAGS
+LIBS="$GUILE_LIBS $LIBS"
+CPPFLAGS="$CPPFLAGS $GUILE_CPPFLAGS"
 
 AC_MSG_CHECKING([for libctl dir])
 if test x != x"$LIBCTL_DIR" -a ! -r "$LIBCTL_DIR/base/ctl.scm"; then
@@ -373,7 +388,7 @@ AC_SUBST(CTL_H_CPPFLAG)
 save_CPPFLAGS=$CPPFLAGS
 CPPFLAGS="$CPPFLAGS $CTL_H_CPPFLAG"
 # Check libctl version >= LIBCTL_MAJOR.LIBCTL_MINOR.LIBCTL_BUGFIX
-LIBCTL_MAJOR=3; LIBCTL_MINOR=2; LIBCTL_BUGFIX=0
+LIBCTL_MAJOR=4; LIBCTL_MINOR=0; LIBCTL_BUGFIX=0
 AC_MSG_CHECKING([whether libctl version is at least ${LIBCTL_MAJOR}.${LIBCTL_MINOR}.${LIBCTL_BUGFIX}])
 AC_EGREP_CPP(yes, [[
 #include <ctl.h>
@@ -392,16 +407,26 @@ else
    AC_MSG_RESULT(no)
 fi
 
-# On IRIX, basename/dirname functions in libctl/main.c require -lgen
-AC_CHECK_LIB(gen, basename)
+LIBS=$save_LIBS
+CPPFLAGS=$save_CPPFLAGS
 
 fi # if with_libctl
 
 ##############################################################################
 
-LIBCTL_LIBS=$LIBS
+LIBCTL_LIBS="-lctl $GUILE_LIBS"
+LIBCTL_CPPFLAGS="$GUILE_CPPFLAGS"
 AC_SUBST(LIBCTL_LIBS)
-LIBS=$meep_save_LIBS
+AC_SUBST(LIBCTL_CPPFLAGS)
+
+##############################################################################
+
+# check for -lctlgeom:
+AC_CHECK_LIB(ctlgeom, vector3_dot, [have_libctlgeom=yes], [have_libctlgeom=no])
+AM_CONDITIONAL(WITH_LIBCTLGEOM, test x"$have_libctlgeom" = "xyes")
+
+LIBCTLGEOM_LIBS="-lctlgeom"
+AC_SUBST(LIBCTLGEOM_LIBS)
 
 ##############################################################################
 # The following function is used only for debugging.  Note that
@@ -424,11 +449,11 @@ AC_MSG_RESULT($feenableexcept_decl_ok)
 
 ##############################################################################
 # See if we need to catch SIGFPE to avoid crashing on underflow exceptions
-# etcetera, since some stupid operating systems (e.g. Alpha/Tru64) crash on 
+# etcetera, since some stupid operating systems (e.g. Alpha/Tru64) crash on
 # SIGFPE by default.
 
 AC_MSG_CHECKING([whether to catch and ignore SIGFPE signals])
-AC_RUN_IFELSE([AC_LANG_PROGRAM([], [volatile double x=1,y=0; return x/y;])], 
+AC_RUN_IFELSE([AC_LANG_PROGRAM([], [volatile double x=1,y=0; return x/y;])],
               [ignore_sigfpe=no], [ignore_sigfpe=yes], [ignore_sigfpe=no])
 AC_MSG_RESULT($ignore_sigfpe)
 if test $ignore_sigfpe = yes; then
@@ -452,19 +477,18 @@ AC_TRY_COMPILE([], [_Pragma("ivdep")], [], [AC_DEFINE([_Pragma],[],[define to no
 
 ##############################################################################
 
-AC_SUBST(MEEP_SUFFIX)
-program_transform_name="s,_,-,g;$program_transform_name"
-
-##############################################################################
 # checks for python
 ##############################################################################
 AC_ARG_WITH(python,
-	[AC_HELP_STRING([--with-python], [compile Python interface])],
-        with_python=$withval,with_python=no)
+	[AC_HELP_STRING([--without-python], [compile without Python interface])],
+        with_python=$withval,with_python=yes)
 
 if test "x$with_python" = xno; then
   have_python=no
 else
+  if test "x$have_libctlgeom" = xno; then
+    AC_MSG_ERROR([libctlgeom was not found, is required for Python interface])
+  fi
 
   if test "$enable_shared" = no; then
      AC_MSG_WARN([Python interface requires --enable-shared; disabling])
@@ -480,7 +504,7 @@ else
       test -n "$pinc" && PYTHON_INCLUDES="-I$pinc"
       save_CPPFLAGS=$CPPFLAGS
       CPPFLAGS="$CPPFLAGS $PYTHON_INCLUDES"
-      AC_CHECK_HEADER([Python.h], [], [AC_MSG_WARN([disabling Python wrappers]) 
+      AC_CHECK_HEADER([Python.h], [], [AC_MSG_WARN([disabling Python wrappers])
                                        have_python=no])
 
       if test $have_python = yes; then
@@ -510,10 +534,10 @@ AC_CONFIG_FILES([
 	meep-pkgconfig
 	src/Makefile
 	tests/Makefile
-	examples/Makefile
-	libctl/Makefile
-	libctl/meep.scm
+	scheme/Makefile
+	scheme/meep.scm
 	libmeepgeom/Makefile
+	libpympb/Makefile
 	python/Makefile
 ])
 

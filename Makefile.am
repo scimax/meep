@@ -1,26 +1,31 @@
-if WITH_LIBCTL
-LIBCTL = libctl
-else
-LIBCTL =
-endif
-
 ACLOCAL_AMFLAGS=-I m4
 
-SUBDIRS = src $(LIBCTL) tests examples libmeepgeom
+SUBDIRS = src tests
 
+if WITH_LIBCTL
+  SUBDIRS += scheme
+endif
+if WITH_LIBCTLGEOM
+  SUBDIRS += libmeepgeom
+endif
+if WITH_MPB
+if WITH_LIBCTLGEOM
+  SUBDIRS += libpympb
+endif
+endif
 if WITH_PYTHON
   SUBDIRS += python
 endif
 
-EXTRA_DIST = COPYRIGHT m4 meep-pkgconfig.in
+EXTRA_DIST = NEWS.md LICENSE COPYRIGHT m4 meep-pkgconfig.in
 
 pkgconfigdir = $(libdir)/pkgconfig
-pkgconfig_DATA = meep@MEEP_SUFFIX@.pc
+pkgconfig_DATA = meep.pc
 
-meep@MEEP_SUFFIX@.pc: meep-pkgconfig
+meep.pc: meep-pkgconfig
 	cp -f $(top_builddir)/meep-pkgconfig $@
 
 libmeep:
 	cd src && $(MAKE)
 
-DISTCLEANFILES = meep@MEEP_SUFFIX@.pc
+DISTCLEANFILES = meep.pc

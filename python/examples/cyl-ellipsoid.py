@@ -6,7 +6,7 @@ import meep as mp
 def main():
 
     c = mp.Cylinder(radius=3, material=mp.Medium(index=3.5))
-    e = mp.Ellipsoid(size=mp.Vector3(1, 2, 1e20))
+    e = mp.Ellipsoid(size=mp.Vector3(1, 2, mp.inf))
 
     src_cmpt = mp.Hz
     sources = mp.Source(src=mp.GaussianSource(1, fwidth=0.1), component=src_cmpt, center=mp.Vector3())
@@ -26,8 +26,8 @@ def main():
 
     def print_stuff(sim_obj):
         v = mp.Vector3(4.13, 3.75, 0)
-        p = sim._get_field_point(src_cmpt, v)
-        print("t, Ez: {} {}+{}i".format(sim._round_time(), p.real, p.imag))
+        p = sim.get_field_point(src_cmpt, v)
+        print("t, Ez: {} {}+{}i".format(sim.round_time(), p.real, p.imag))
 
     sim.run(mp.at_beginning(mp.output_epsilon),
             mp.at_every(0.25, print_stuff),
@@ -35,7 +35,7 @@ def main():
             mp.at_end(mp.output_efield_z),
             until=23)
 
-    print("stopped at meep time = {}".format(sim._round_time()))
+    print("stopped at meep time = {}".format(sim.round_time()))
 
 
 if __name__ == '__main__':

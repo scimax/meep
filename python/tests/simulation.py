@@ -1,9 +1,13 @@
+import os
+import shutil
 import unittest
 import numpy as np
 import meep as mp
 
 
 class TestSimulation(unittest.TestCase):
+
+    fname = 'simulation-ez-000200.00.h5'
 
     def test_interpolate_numbers(self):
 
@@ -76,6 +80,203 @@ class TestSimulation(unittest.TestCase):
 
         self.assertEqual(len(expected), len(res))
         np.testing.assert_allclose(expected, res)
+
+    def init_simple_simulation(self, **kwargs):
+        resolution = 20
+
+        cell = mp.Vector3(10, 10)
+
+        pml_layers = mp.PML(1.0)
+
+        fcen = 1.0
+        df = 1.0
+
+        sources = mp.Source(src=mp.GaussianSource(fcen, fwidth=df), center=mp.Vector3(),
+                            component=mp.Ez)
+
+        symmetries = [mp.Mirror(mp.X), mp.Mirror(mp.Y)]
+
+        return mp.Simulation(resolution=resolution,
+                             cell_size=cell,
+                             boundary_layers=[pml_layers],
+                             sources=[sources],
+                             symmetries=symmetries,
+                             **kwargs)
+
+    @unittest.skipIf(not mp.with_mpi(), "MPI specific test")
+    def test_mpi(self):
+        self.assertGreater(mp.comm.Get_size(), 1)
+
+    def test_use_output_directory_default(self):
+        sim = self.init_simple_simulation()
+        sim.use_output_directory()
+        sim.run(mp.at_end(mp.output_efield_z), until=200)
+
+        output_dir = 'simulation-out'
+        self.assertTrue(os.path.exists(os.path.join(output_dir, self.fname)))
+
+        mp.all_wait()
+        if mp.am_master():
+            shutil.rmtree(output_dir)
+
+    def test_use_output_directory_custom(self):
+        sim = self.init_simple_simulation()
+        sim.use_output_directory('custom_dir')
+        sim.run(mp.at_end(mp.output_efield_z), until=200)
+
+        output_dir = 'custom_dir'
+        self.assertTrue(os.path.exists(os.path.join(output_dir, self.fname)))
+
+        mp.all_wait()
+        if mp.am_master():
+            shutil.rmtree(output_dir)
+
+    def test_at_time(self):
+        sim = self.init_simple_simulation()
+        sim.run(mp.at_time(100, mp.output_efield_z), until=200)
+
+        fname = 'simulation-ez-000100.00.h5'
+        self.assertTrue(os.path.exists(fname))
+
+        mp.all_wait()
+        if mp.am_master():
+            os.remove(fname)
+
+    def test_after_sources_and_time(self):
+        sim = self.init_simple_simulation()
+
+        done = [False]
+
+        def _done(sim, todo):
+            done[0] = True
+
+        sim.run(mp.after_sources_and_time(1, _done), until_after_sources=2)
+
+        self.assertTrue(done[0])
+
+    def test_with_prefix(self):
+        sim = self.init_simple_simulation()
+        sim.run(mp.with_prefix('test_prefix-', mp.at_end(mp.output_efield_z)), until=200)
+
+        fname = 'test_prefix-simulation-ez-000200.00.h5'
+        self.assertTrue(os.path.exists(fname))
+
+        mp.all_wait()
+        if mp.am_master():
+            os.remove(fname)
+
+    def test_extra_materials(self):
+        sim = self.init_simple_simulation()
+        sim.extra_materials = [mp.Medium(epsilon=5), mp.Medium(epsilon=10)]
+        sim.run(mp.at_end(lambda sim: None), until=5)
+
+    def test_require_dimensions(self):
+        sim = self.init_simple_simulation()
+        self.assertIsNone(sim.structure)
+        self.assertEqual(sim.dimensions, 3)
+
+        sim.require_dimensions()
+        sim._init_structure(k=mp.Vector3())
+        self.assertEqual(sim.structure.gv.dim, mp.D2)
+
+    def test_infer_dimensions(self):
+        sim = self.init_simple_simulation()
+        self.assertEqual(sim.dimensions, 3)
+        sim._init_structure()
+        self.assertEqual(sim.dimensions, 2)
+
+    def test_in_volume(self):
+        sim = self.init_simple_simulation()
+        sim.filename_prefix = 'test_in_volume'
+        vol = mp.Volume(mp.Vector3(), size=mp.Vector3(x=2))
+        sim.run(mp.at_end(mp.in_volume(vol, mp.output_efield_z)), until=200)
+
+    def test_in_point(self):
+        sim = self.init_simple_simulation(filename_prefix='test_in_point')
+        fn = sim.filename_prefix + '-ez-000200.00.h5'
+        pt = mp.Vector3()
+        sim.run(mp.at_end(mp.in_point(pt, mp.output_efield_z)), until=200)
+        self.assertTrue(os.path.exists(fn))
+
+        mp.all_wait()
+        if mp.am_master():
+            os.remove(fn)
+
+    def test_epsilon_input_file(self):
+        sim = self.init_simple_simulation()
+        eps_input_fname = 'cyl-ellipsoid-eps-ref.h5'
+        eps_input_dir = os.path.join(os.path.abspath(os.path.realpath(os.path.dirname(__file__))),
+                                     '..', '..', 'libmeepgeom')
+        eps_input_path = os.path.join(eps_input_dir, eps_input_fname)
+        sim.epsilon_input_file = eps_input_path
+
+        sim.run(until=200)
+        fp = sim.get_field_point(mp.Ez, mp.Vector3(x=1))
+
+        self.assertAlmostEqual(fp, -0.002989654055823199 + 0j)
+
+    def test_set_materials(self):
+
+        def change_geom(sim):
+            t = sim.meep_time()
+            fn = t * 0.02
+            geom = [mp.Cylinder(radius=3, material=mp.Medium(index=3.5), center=mp.Vector3(fn, fn)),
+                    mp.Ellipsoid(size=mp.Vector3(1, 2, mp.inf), center=mp.Vector3(fn, fn))]
+
+            sim.set_materials(geometry=geom)
+
+        c = mp.Cylinder(radius=3, material=mp.Medium(index=3.5))
+        e = mp.Ellipsoid(size=mp.Vector3(1, 2, mp.inf))
+
+        sources = mp.Source(src=mp.GaussianSource(1, fwidth=0.1), component=mp.Hz, center=mp.Vector3())
+        symmetries = [mp.Mirror(mp.X, -1), mp.Mirror(mp.Y, -1)]
+
+        sim = mp.Simulation(cell_size=mp.Vector3(10, 10),
+                            geometry=[c, e],
+                            boundary_layers=[mp.PML(1.0)],
+                            sources=[sources],
+                            symmetries=symmetries,
+                            resolution=16)
+
+        eps = {'arr1': None, 'arr2': None}
+
+        def get_arr1(sim):
+            eps['arr1'] = sim.get_array(mp.Vector3(), mp.Vector3(10, 10), mp.Dielectric)
+
+        def get_arr2(sim):
+            eps['arr2'] = sim.get_array(mp.Vector3(), mp.Vector3(10, 10), mp.Dielectric)
+
+        sim.run(mp.at_time(50, get_arr1), mp.at_time(100, change_geom),
+                mp.at_end(get_arr2), until=200)
+
+        self.assertFalse(np.array_equal(eps['arr1'], eps['arr2']))
+
+    def test_modal_volume_in_box(self):
+        sim = self.init_simple_simulation()
+        sim.run(until=200)
+        vol = sim.fields.total_volume()
+        self.assertAlmostEqual(sim.fields.modal_volume_in_box(vol),
+                               sim.modal_volume_in_box())
+
+        vol = mp.Volume(mp.Vector3(), size=mp.Vector3(1, 1, 1))
+        self.assertAlmostEqual(sim.fields.modal_volume_in_box(vol.swigobj),
+                               sim.modal_volume_in_box(vol))
+
+    def test_in_box_volumes(self):
+        sim = self.init_simple_simulation()
+        sim.run(until=200)
+
+        tv = sim.fields.total_volume()
+        v = mp.Volume(mp.Vector3(), size=mp.Vector3(5, 5))
+
+        sim.electric_energy_in_box(tv)
+        sim.electric_energy_in_box(v)
+        sim.flux_in_box(mp.X, tv)
+        sim.flux_in_box(mp.X, v)
+        sim.magnetic_energy_in_box(tv)
+        sim.magnetic_energy_in_box(v)
+        sim.field_energy_in_box(tv)
+        sim.field_energy_in_box(v)
 
 
 if __name__ == '__main__':

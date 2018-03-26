@@ -10,7 +10,7 @@ OBJ = $(SRC:.cpp=.o)
 DAC = $(SRC:.cpp=.dac)
 DONE = $(SRC:.cpp=.done)
 
-LIBMEEP = $(top_builddir)/src/libmeep@MEEP_SUFFIX@.la
+LIBMEEP = $(top_builddir)/src/libmeep.la
 AM_CPPFLAGS = -I$(top_srcdir)/src
 
 .SUFFIXES = .dac .done
@@ -76,7 +76,10 @@ pml_LDADD = $(LIBMEEP)
 
 TESTS = aniso_disp bench bragg_transmission convergence_cyl_waveguide cylindrical flux harmonics integrate known_results near2far one_dimensional physical stress_tensor symmetry three_d two_dimensional 2D_convergence h5test pml 
 
-LOG_COMPILER = $(RUNCODE)
+if WITH_MPI
+ LOG_COMPILER = $(RUNCODE)
+endif
+#LOG_COMPILER = $(RUNCODE)
 
 # Note: this requires GNU make
 
@@ -96,3 +99,6 @@ dac: $(DAC)
 
 clean-local::
 	rm -f *.o *.dac debug_out_* *.done
+
+distclean-local:
+	rm -f *.h5

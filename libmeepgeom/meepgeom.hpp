@@ -31,6 +31,10 @@
 
 namespace meep_geom {
 
+#ifndef cdouble
+typedef std::complex<double> cdouble;
+#endif
+
 // constants from meep-ctl-const.hpp
 #define CYLINDRICAL -2
 
@@ -61,7 +65,6 @@ typedef struct absorber {
   double thickness;
   int direction;
   int side;
-  double strength;
   double R_asymptotic;
   double mean_stretch;
   meep::pml_profile_func pml_profile;
@@ -76,12 +79,13 @@ void destroy_absorber_list(absorber_list alist);
 void add_absorbing_layer(absorber_list alist,
                          double thickness,
                          int direction=ALL_DIRECTIONS, int side=ALL_SIDES,
-                         double strength=1.0, double R_asymptotic=1.0e-15, double mean_stretch=1.0,
+                         double R_asymptotic=1.0e-15, double mean_stretch=1.0,
                          meep::pml_profile_func func=meep::pml_quadratic_profile, void *func_data=0);
 
 /***************************************************************/
 /***************************************************************/
 /***************************************************************/
+void set_dimensions(int dims);
 void set_materials_from_geometry(meep::structure *s,
                                  geometric_object_list g,
                                  bool use_anisotropic_averaging=true,
@@ -90,12 +94,32 @@ void set_materials_from_geometry(meep::structure *s,
                                  bool ensure_periodicity=false,
                                  bool verbose=false,
                                  material_type _default_material=vacuum,
-                                 absorber_list alist=0);
+                                 absorber_list alist=0,
+                                 material_type_list extra_materials=material_type_list());
 
 material_type make_dielectric(double epsilon);
+material_type make_user_material(user_material_func user_func,
+                                 void *user_data);
+material_type make_file_material(const char *eps_input_file);
 
 vector3 vec_to_vector3(const meep::vec &pt);
 meep::vec vector3_to_vec(const vector3 v3);
+
+meep::realnum linear_interpolate(meep::realnum rx, meep::realnum ry, meep::realnum rz,
+                                 meep::realnum *data, int nx, int ny, int nz, int stride);
+void epsilon_file_material(material_data *md, vector3 p);
+bool susceptibility_equal(const susceptibility &s1, const susceptibility &s2);
+bool susceptibility_list_equal(const susceptibility_list &s1, const susceptibility_list &s2);
+bool medium_struct_equal(const medium_struct *m1, const medium_struct *m2);
+void material_gc(material_type m);
+bool material_type_equal(const material_type m1, const material_type m2);
+bool is_variable(material_type mt);
+bool is_variable(void* md);
+bool is_file(material_type md);
+bool is_file(void* md);
+bool is_medium(material_type md, medium_struct **m);
+bool is_medium(void* md, medium_struct **m);
+bool is_metal(meep::field_type ft, const material_type *material);
 
 }; // namespace meep_geom
 

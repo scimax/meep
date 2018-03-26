@@ -31,7 +31,9 @@ fields::fields(structure *s, double m, double beta,
 	       bool zero_fields_near_cylorigin) :
   S(s->S), gv(s->gv), user_volume(s->user_volume), v(s->v), m(m), beta(beta)
 {
+  shared_chunks = s->shared_chunks;
   verbosity = 0;
+  components_allocated = false;
   synchronized_magnetic_fields = 0;
   outdir = new char[strlen(s->outdir) + 1]; strcpy(outdir, s->outdir);
   if (gv.dim == Dcyl)
@@ -59,7 +61,7 @@ fields::fields(structure *s, double m, double beta,
 				 beta, zero_fields_near_cylorigin);
   FOR_FIELD_TYPES(ft) {
     for (int ip=0;ip<3;ip++) {
-      comm_sizes[ft][ip] = new int[num_chunks*num_chunks];
+      comm_sizes[ft][ip] = new size_t[num_chunks*num_chunks];
       for (int i=0;i<num_chunks*num_chunks;i++) comm_sizes[ft][ip][i] = 0;
     }
     typedef realnum *realnum_ptr;
@@ -82,7 +84,9 @@ fields::fields(structure *s, double m, double beta,
 fields::fields(const fields &thef) :
   S(thef.S), gv(thef.gv), user_volume(thef.user_volume), v(thef.v)
 {
+  shared_chunks = thef.shared_chunks;
   verbosity = 0;
+  components_allocated = thef.components_allocated;
   synchronized_magnetic_fields = thef.synchronized_magnetic_fields;
   outdir = new char[strlen(thef.outdir) + 1]; strcpy(outdir, thef.outdir);
   m = thef.m;
@@ -109,7 +113,7 @@ fields::fields(const fields &thef) :
     chunks[i] = new fields_chunk(*thef.chunks[i]);
   FOR_FIELD_TYPES(ft) {
     for (int ip=0;ip<3;ip++) {
-      comm_sizes[ft][ip] = new int[num_chunks*num_chunks];
+      comm_sizes[ft][ip] = new size_t[num_chunks*num_chunks];
       for (int i=0;i<num_chunks*num_chunks;i++) comm_sizes[ft][ip][i] = 0;
     }
     typedef realnum *realnum_ptr;
@@ -160,8 +164,6 @@ bool fields::have_component(component c) {
 }
 
 fields_chunk::~fields_chunk() {
-  if (s->refcount-- <= 1) delete s; // delete if not shared
-  if (new_s && new_s->refcount-- <= 1) delete new_s; // delete if not shared
   is_real = 0; // So that we can make sure to delete everything...
   // for mu=1 non-PML regions, H==B to save space/time - don't delete twice!
   DOCMP2 FOR_H_AND_B(hc,bc) if (f[hc][cmp] == f[bc][cmp]) f[bc][cmp] = NULL;
@@ -198,6 +200,8 @@ fields_chunk::~fields_chunk() {
     p->s->delete_internal_data(p->data);
     delete p;
   }
+  if (s->refcount-- <= 1) delete s; // delete if not shared
+  if (new_s && new_s->refcount-- <= 1) delete new_s; // delete if not shared
 }
 
 fields_chunk::fields_chunk(structure_chunk *the_s, const char *od,
@@ -436,13 +440,13 @@ bool fields_chunk::alloc_f(component c) {
 	  component bc = direction_component(Bx, component_direction(c));
 	  if (!f[bc][cmp]) {
 	    f[bc][cmp] = new realnum[gv.ntot()];
-	    for (int i=0;i<gv.ntot();i++) f[bc][cmp][i] = 0.0;
+	    for (size_t i=0;i<gv.ntot();i++) f[bc][cmp][i] = 0.0;
 	  }
 	  f[c][cmp] = f[bc][cmp];
 	}
 	else {
 	  f[c][cmp] = new realnum[gv.ntot()];
-	  for (int i=0;i<gv.ntot();i++) f[c][cmp][i] = 0.0;
+	  for (size_t i=0;i<gv.ntot();i++) f[c][cmp][i] = 0.0;
 	}
       }
     }
@@ -456,6 +460,8 @@ void fields::require_component(component c) {
 
   if (beta != 0 && gv.dim != D2)
     abort("Nonzero beta unsupported in dimensions other than 2.");
+
+  components_allocated = true;
 
   // check if we are in 2d but anisotropy couples xy with z
   bool aniso2d = false;
@@ -482,8 +488,8 @@ void fields::require_component(component c) {
   FOR_COMPONENTS(c_alloc)
     if (gv.has_field(c_alloc) && (is_like(gv.dim, c, c_alloc) || aniso2d))
       for (int i = 0; i < num_chunks; ++i)
-	if (chunks[i]->alloc_f(c_alloc))
-	  need_to_reconnect++;
+      	if (chunks[i]->alloc_f(c_alloc))
+      	  need_to_reconnect++;
 
   if (need_to_reconnect) figure_out_step_plan();
   if (sum_to_all(need_to_reconnect)) chunk_connections_valid = false;
@@ -500,7 +506,7 @@ void fields::remove_sources() {
     chunks[i]->remove_sources();
 }
 
-void fields_chunk::remove_susceptibilities() {
+void fields_chunk::remove_susceptibilities(bool shared_chunks) {
   FOR_FIELD_TYPES(ft) {
     for (polarization_state *cur = pol[ft]; cur; ) {
       polarization_state *p = cur;
@@ -511,13 +517,15 @@ void fields_chunk::remove_susceptibilities() {
     pol[ft] = NULL;
   }
 
-  changing_structure();
+  if (!shared_chunks) {
+    changing_structure();
+  }
   s->remove_susceptibilities();
 }
 
 void fields::remove_susceptibilities() {
   for (int i=0;i<num_chunks;i++)
-    chunks[i]->remove_susceptibilities();
+    chunks[i]->remove_susceptibilities(shared_chunks);
 }
 
 void fields::remove_fluxes() {

@@ -4,11 +4,16 @@ import functools
 import math
 import numbers
 import operator
+import warnings
+from collections import namedtuple
 from copy import deepcopy
 from numbers import Number
 
 import numpy as np
 import meep as mp
+
+
+FreqRange = namedtuple('FreqRange', ['min', 'max'])
 
 
 def check_nonnegative(prop, val):
@@ -113,6 +118,19 @@ class Vector3(object):
         vperp = self - vpar
         return vpar + (vperp.scale(math.cos(theta)) + vcross.scale(math.sin(theta)))
 
+    # rotate vectors in lattice/reciprocal coords (note that the axis
+    # is also given in the corresponding basis):
+
+    def rotate_lattice(self, axis, theta, lat):
+        a = lattice_to_cartesian(axis, lat)
+        v = lattice_to_cartesian(self, lat)
+        return cartesian_to_lattice(v.rotate(a, theta), lat)
+
+    def rotate_reciprocal(self, axis, theta, lat):
+        a = reciprocal_to_cartesian(axis, lat)
+        v = reciprocal_to_cartesian(self, lat)
+        return cartesian_to_reciprocal(v.rotate(a, theta), lat)
+
 
 class Medium(object):
 
@@ -138,7 +156,8 @@ class Medium(object):
                  E_chi2=None,
                  E_chi3=None,
                  H_chi2=None,
-                 H_chi3=None):
+                 H_chi3=None,
+                 valid_freq_range=None):
 
         if epsilon:
             epsilon_diag = Vector3(epsilon, epsilon, epsilon)
@@ -175,6 +194,7 @@ class Medium(object):
         self.H_chi3_diag = H_chi3_diag
         self.D_conductivity_diag = D_conductivity_diag
         self.B_conductivity_diag = B_conductivity_diag
+        self.valid_freq_range = valid_freq_range
 
 
 class Susceptibility(object):
@@ -310,6 +330,22 @@ class Ellipsoid(Block):
 
     def __init__(self, **kwargs):
         super(Ellipsoid, self).__init__(**kwargs)
+
+
+class Prism(GeometricObject):
+
+    def __init__(self, vertices, height, axis=Vector3(z=1), center=None, **kwargs):
+        centroid = sum(vertices, Vector3(0)) * (1.0 / len(vertices)) + (0.5*height)*axis
+        if center is not None and len(vertices): # shift centroid to center
+            shift = center - centroid
+            vertices = map(lambda v: v + shift, vertices)
+        else:
+            center = centroid
+        self.vertices = vertices
+        self.height = height
+        self.axis = axis
+
+        super(Prism, self).__init__(center=center, **kwargs)
 
 
 class Matrix(object):

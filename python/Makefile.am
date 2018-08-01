@@ -1,4 +1,5 @@
 HPPFILES=                                    \
+ $(top_srcdir)/src/meep.hpp                  \
  $(top_srcdir)/src/meep_internals.hpp        \
  $(top_srcdir)/src/bicgstab.hpp              \
  $(top_srcdir)/src/meep/vec.hpp              \
@@ -37,8 +38,10 @@ _mpb_la_CPPFLAGS = $(PYTHON_INCLUDES) $(AM_CPPFLAGS)
 # material_dispersion.py test must be excluded from test suite for MPI build
 if WITH_MPI
   MDPYTEST=
+  MPBPYTEST=
 else
   MDPYTEST=$(TEST_DIR)/material_dispersion.py
+  MPBPYTEST=$(TEST_DIR)/mpb.py
 endif
 
 TEST_DIR = tests
@@ -48,17 +51,22 @@ TESTS =                                   \
     $(TEST_DIR)/antenna_radiation.py      \
     $(TEST_DIR)/bend_flux.py              \
     $(TEST_DIR)/cavity_arrayslice.py      \
+    $(TEST_DIR)/chunks.py                 \
     $(TEST_DIR)/cyl_ellipsoid.py          \
+    $(TEST_DIR)/dft_fields.py             \
     $(TEST_DIR)/field_functions.py        \
     $(TEST_DIR)/force.py                  \
+    $(TEST_DIR)/fragment_stats.py         \
     $(TEST_DIR)/geom.py                   \
     $(TEST_DIR)/holey_wvg_bands.py        \
     $(TEST_DIR)/holey_wvg_cavity.py       \
     $(TEST_DIR)/ldos.py                   \
     $(MDPYTEST)                           \
-    $(TEST_DIR)/mpb.py                    \
+    $(MPBPYTEST)                          \
+    $(TEST_DIR)/mode_coeffs.py            \
     $(TEST_DIR)/physical.py               \
     $(TEST_DIR)/pw_source.py              \
+    $(TEST_DIR)/refl_angular.py           \
     $(TEST_DIR)/ring.py                   \
     $(TEST_DIR)/ring_cyl.py               \
     $(TEST_DIR)/simulation.py             \
@@ -102,11 +110,13 @@ meep.py: meep-python.cpp
 
 mpb.py: mpb-python.cpp
 
-__init__.py: meep.py
+__init__.py: meep.py mpb.py
 	cp $< $@
 	if [[ "${SWIG_VERSION}" = 3.0.12 ]]; then \
 		sed -i.bak '/^if _swig_python_version_info >= (2, 7, 0):/,/^else:/d' $@; \
 		sed -i.bak 's/    import _meep/from . import _meep/' $@; \
+		sed -i.bak '/^if _swig_python_version_info >= (2, 7, 0):/,/^else:/d' mpb.py; \
+		sed -i.bak 's/    import _mpb/from . import _mpb/' mpb.py; \
 	fi
 
 

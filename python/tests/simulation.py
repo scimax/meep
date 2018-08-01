@@ -1,8 +1,21 @@
 import os
 import shutil
+import sys
 import unittest
+import warnings
+import h5py
 import numpy as np
 import meep as mp
+
+
+try:
+    unicode
+except NameError:
+    unicode = str
+
+
+examples_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', 'examples'))
+sys.path.insert(0, examples_dir)
 
 
 class TestSimulation(unittest.TestCase):
@@ -215,6 +228,13 @@ class TestSimulation(unittest.TestCase):
 
         self.assertAlmostEqual(fp, -0.002989654055823199 + 0j)
 
+        # Test unicode file name for Python 2
+        if sys.version_info[0] == 2:
+            sim = self.init_simple_simulation(epsilon_input_file=unicode(eps_input_path))
+            sim.run(until=200)
+            fp = sim.get_field_point(mp.Ez, mp.Vector3(x=1))
+            self.assertAlmostEqual(fp, -0.002989654055823199 + 0j)
+
     def test_set_materials(self):
 
         def change_geom(sim):
@@ -241,10 +261,12 @@ class TestSimulation(unittest.TestCase):
         eps = {'arr1': None, 'arr2': None}
 
         def get_arr1(sim):
-            eps['arr1'] = sim.get_array(mp.Vector3(), mp.Vector3(10, 10), mp.Dielectric)
+            eps['arr1'] = sim.get_array(mp.Volume(mp.Vector3(), mp.Vector3(10, 10)),
+                                        component=mp.Dielectric)
 
         def get_arr2(sim):
-            eps['arr2'] = sim.get_array(mp.Vector3(), mp.Vector3(10, 10), mp.Dielectric)
+            eps['arr2'] = sim.get_array(mp.Volume(mp.Vector3(), mp.Vector3(10, 10)),
+                                        component=mp.Dielectric)
 
         sim.run(mp.at_time(50, get_arr1), mp.at_time(100, change_geom),
                 mp.at_end(get_arr2), until=200)
@@ -277,6 +299,209 @@ class TestSimulation(unittest.TestCase):
         sim.magnetic_energy_in_box(v)
         sim.field_energy_in_box(tv)
         sim.field_energy_in_box(v)
+
+    def test_load_dump_structure(self):
+        resolution = 10
+        cell = mp.Vector3(10, 10)
+        pml_layers = mp.PML(1.0)
+        fcen = 1.0
+        df = 1.0
+        sources = mp.Source(src=mp.GaussianSource(fcen, fwidth=df), center=mp.Vector3(),
+                            component=mp.Hz)
+        geometry = mp.Cylinder(0.2, material=mp.Medium(index=3))
+
+        sim = mp.Simulation(resolution=resolution,
+                            cell_size=cell,
+                            default_material=mp.Medium(index=1),
+                            geometry=[geometry],
+                            boundary_layers=[pml_layers],
+                            sources=[sources])
+
+        sim.run(until=200)
+        ref_field = sim.get_field_point(mp.Hz, mp.Vector3(z=2))
+        dump_fn = 'test_load_dump_structure.h5'
+        sim.dump_structure(dump_fn)
+
+        sim = mp.Simulation(resolution=resolution,
+                            cell_size=cell,
+                            default_material=mp.Medium(index=1),
+                            geometry=[],
+                            boundary_layers=[pml_layers],
+                            sources=[sources],
+                            load_structure=dump_fn)
+        sim.run(until=200)
+        field = sim.get_field_point(mp.Hz, mp.Vector3(z=2))
+
+        self.assertAlmostEqual(ref_field, field)
+
+        mp.all_wait()
+        if mp.am_master():
+            os.remove(dump_fn)
+
+    def test_get_array_output(self):
+        sim = self.init_simple_simulation()
+        sim.symmetries = []
+        sim.geometry = [mp.Cylinder(0.2, material=mp.Medium(index=3))]
+        sim.filename_prefix = 'test_get_array_output'
+        sim.run(until=20)
+
+        mp.output_epsilon(sim)
+        mp.output_efield_z(sim)
+        mp.output_tot_pwr(sim)
+        mp.output_efield(sim)
+
+        eps_arr = sim.get_epsilon()
+        efield_z_arr = sim.get_efield_z()
+        energy_arr = sim.get_tot_pwr()
+        efield_arr = sim.get_efield()
+
+        fname_fmt = "test_get_array_output-{}-000020.00.h5"
+
+        with h5py.File(fname_fmt.format('eps'), 'r') as f:
+            eps = f['eps'].value
+
+        with h5py.File(fname_fmt.format('ez'), 'r') as f:
+            efield_z = f['ez'].value
+
+        with h5py.File(fname_fmt.format('energy'), 'r') as f:
+            energy = f['energy'].value
+
+        with h5py.File(fname_fmt.format('e'), 'r') as f:
+            ex = f['ex'].value
+            ey = f['ey'].value
+            ez = f['ez'].value
+            efield = np.stack([ex, ey, ez], axis=-1)
+
+        np.testing.assert_allclose(eps, eps_arr)
+        np.testing.assert_allclose(efield_z, efield_z_arr)
+        np.testing.assert_allclose(energy, energy_arr)
+        np.testing.assert_allclose(efield, efield_arr)
+
+    def test_synchronized_magnetic(self):
+        # Issue 309
+        cell = mp.Vector3(16, 8, 0)
+
+        geometry = [mp.Block(mp.Vector3(1e20, 1, 1e20),
+                             center=mp.Vector3(0, 0),
+                             material=mp.Medium(epsilon=12))]
+
+        sources = [mp.Source(mp.ContinuousSource(frequency=0.15),
+                             component=mp.Ez,
+                             center=mp.Vector3(-7, 0))]
+
+        pml_layers = [mp.PML(1.0)]
+        resolution = 10
+
+        sim = mp.Simulation(
+            cell_size=cell,
+            boundary_layers=pml_layers,
+            geometry=geometry,
+            sources=sources,
+            resolution=resolution
+        )
+
+        sim.run(mp.synchronized_magnetic(mp.output_bfield_y), until=10)
+
+    def test_harminv_warnings(self):
+
+        def check_warnings(sim, h, should_warn=True):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                sim.run(mp.after_sources(h), until_after_sources=5)
+
+                if should_warn:
+                    self.assertEqual(len(w), 1)
+                    self.assertIn("Harminv", str(w[-1].message))
+                else:
+                    self.assertEqual(len(w), 0)
+
+        sources = [mp.Source(src=mp.GaussianSource(1, fwidth=1), center=mp.Vector3(), component=mp.Ez)]
+        sim = mp.Simulation(cell_size=mp.Vector3(10, 10), resolution=10, sources=sources)
+        h = mp.Harminv(mp.Ez, mp.Vector3(), 1.4, 0.5)
+        check_warnings(sim, h)
+
+        sim = mp.Simulation(cell_size=mp.Vector3(10, 10), resolution=10, sources=sources)
+        h = mp.Harminv(mp.Ez, mp.Vector3(), 0.5, 0.5)
+        check_warnings(sim, h)
+
+        sim = mp.Simulation(cell_size=mp.Vector3(10, 10), resolution=10, sources=sources)
+        h = mp.Harminv(mp.Ez, mp.Vector3(), 1, 1)
+        check_warnings(sim, h, should_warn=False)
+
+    def test_vec_constructor(self):
+
+        def assert_one(v):
+            self.assertEqual(v.z(), 1)
+
+        def assert_two(v):
+            self.assertEqual(v.x(), 1)
+            self.assertEqual(v.y(), 2)
+
+        def assert_three(v):
+            assert_two(v)
+            self.assertEqual(v.z(), 3)
+
+        def assert_raises(it, err):
+            with self.assertRaises(err):
+                mp.vec(it)
+
+        v1 = mp.vec(1)
+        assert_one(v1)
+        v2 = mp.vec(1, 2)
+        assert_two(v2)
+        v3 = mp.vec(1, 2, 3)
+        assert_three(v3)
+        mp.vec()
+
+        with self.assertRaises(TypeError):
+            mp.vec(1, 2, 3, 4)
+
+        def check_iterable(one, two, three, four):
+            v1 = mp.vec(one)
+            assert_one(v1)
+            v2 = mp.vec(two)
+            assert_two(v2)
+            v3 = mp.vec(three)
+            assert_three(v3)
+            assert_raises(four, NotImplementedError)
+
+        check_iterable([1], [1, 2], [1, 2, 3], [1, 2, 3, 4])
+        check_iterable((1,), (1, 2), (1, 2, 3), (1, 2, 3, 4))
+        check_iterable(np.array([1.]),
+                       np.array([1., 2.]),
+                       np.array([1., 2., 3.]),
+                       np.array([1., 2., 3., 4.]))
+
+        with self.assertRaises(TypeError):
+            mp.vec([1, 2], 3)
+
+        with self.assertRaises(TypeError):
+            mp.vec(1, [2, 3])
+
+    def test_epsilon_warning(self):
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            from materials_library import Si
+            self.assertEqual(len(w), 0)
+
+        from materials_library import Mo
+        geom = [mp.Sphere(radius=0.2, material=Mo)]
+        sim = self.init_simple_simulation(geometry=geom)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sim.run(until=5)
+            self.assertGreater(len(w), 0)
+            self.assertIn("Epsilon", str(w[0].message))
+
+        from materials_library import SiO2
+        geom = [mp.Sphere(radius=0.2, material=SiO2)]
+        sim = self.init_simple_simulation(geometry=geom)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sim.run(until=5)
+            self.assertEqual(len(w), 1)
+            self.assertNotIn("Epsilon", str(w[0].message))
 
 
 if __name__ == '__main__':

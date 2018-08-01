@@ -1,4 +1,4 @@
-# This example creates an approximate TM planewave in vacuum
+# This example creates an approximate Ez-polarized planewave in vacuum
 # propagating at a 45-degree angle, by using a couple of current sources
 # with amplitude exp(ikx) corresponding to the desired planewave.
 from __future__ import division
@@ -31,7 +31,8 @@ def pw_amp(k, x0):
 fcen = 0.8  # pulse center frequency
 df = 0.02  # turn-on bandwidth
 kdir = mp.Vector3(1, 1)  # direction of k (length is irrelevant)
-k = kdir.unit().scale(2 * math.pi * fcen)  # k with correct length
+n = 1 # refractive index of material containing the source
+k = kdir.unit().scale(2 * math.pi * fcen * n)  # k with correct length
 
 sources = [
     mp.Source(

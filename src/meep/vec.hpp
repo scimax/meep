@@ -518,11 +518,11 @@ ivec one_ivec(ndim);
 
 class ivec {
  public:
-  ivec() { dim = D2; t[X] = t[Y] = 0; };
-  ivec(ndim di) { dim = di; };
+  ivec() { dim = D2; t[X]=t[Y]=t[Z]=0; };
+  ivec(ndim di) { dim = di; t[X]=t[Y]=t[Z]=0; };
   ivec(ndim di, int val) { dim = di; t[0]=t[1]=t[2]=t[3]=t[4]=val; };
-  ivec(int zz) { dim = D1; t[Z] = zz; };
-  ivec(int xx, int yy) { dim = D2; t[X] = xx; t[Y] = yy; };
+  ivec(int zz) { dim = D1; t[X]=t[Y]=0; t[Z] = zz; };
+  ivec(int xx, int yy) { dim = D2; t[X] = xx; t[Y] = yy; t[Z]=0; };
   ivec(int xx, int yy, int zz) {
     dim = D3; t[X] = xx; t[Y] = yy; t[Z] = zz; };
   friend ivec iveccyl(int xx, int yy);
@@ -655,6 +655,7 @@ class volume {
   volume(ndim di) { dim = di; min_corner.dim = di; max_corner.dim = di; };
   volume(const vec &vec1, const vec &vec2);
   volume(const vec &pt);
+  volume(const volume &vol);
   void set_direction_min(direction d, double val) { min_corner.set_direction(d, val); };
   void set_direction_max(direction d, double val) { max_corner.set_direction(d, val); };
   double in_direction_min(direction d) const { return min_corner.in_direction(d); };

@@ -2,7 +2,7 @@
 # Frequency Domain Solver
 ---
 
-This tutorial demonstrates Meep's [frequency-domain solver](../Python_User_Interface/#frequency-domain-solver) which is used to compute the fields produced in a geometry in response to a [continuous-wave (CW) source](https://en.wikipedia.org/wiki/Continuous_wave). For details regarding this feature, refer to this [FAQ](../FAQ/#what-is-meeps-frequency-domain-solver-and-how-does-it-work). This example involves using the frequency-domain solver to compute the fields of a ring resonator which has been described in a [separate tutorial](Basics/#modes-of-a-ring-resonator). First, we will verify that the error in the computed fields decreases monotonically with decreasing tolerance of the iterative solver. And then, we will demonstrate qualitative agreement with the frequency-domain fields computed using a different method: [Fourier-transforming](https://en.wikipedia.org/wiki/Discrete_Fourier_transform) the time-domain fields in response to a narrowband Gaussian-pulse source.
+This tutorial demonstrates Meep's [frequency-domain solver](../Python_User_Interface/#frequency-domain-solver) which is used to compute the fields produced in a geometry in response to a [continuous-wave (CW) source](https://en.wikipedia.org/wiki/Continuous_wave). For details on how this feature works, see Section 5.3 ("Frequency-domain solver") of [Computer Physics Communications, Vol. 181, pp. 687-702, 2010](http://ab-initio.mit.edu/~oskooi/papers/Oskooi10.pdf). This example involves using the frequency-domain solver to compute the fields of a ring resonator which has been described in [Tutorial/Basics](Basics/#modes-of-a-ring-resonator). First, we will verify that the error in the computed fields decreases monotonically with decreasing tolerance of the iterative solver. And then, we will demonstrate qualitative agreement with the frequency-domain fields computed using a different method: [Fourier transforming](https://en.wikipedia.org/wiki/Discrete_Fourier_transform) the time-domain fields in response to a narrowband Gaussian-pulse source.
 
 Usage of the frequency-domain solver involves only two changes to the [original simulation](https://github.com/stevengj/meep/blob/master/python/examples/ring.py): (1) replace the Gaussian-pulse source with a [continuous source](../Python_User_Interface/#continuoussource), and (2) turn on complex fields since, by default, real fields are used. Everything else remains unchanged.
 
@@ -44,7 +44,7 @@ tols = np.power(10, np.arange(-8.0,-8.0-num_tols,-1.0))
 ez_dat = np.zeros((122,122,num_tols), dtype=np.complex_)
 
 for i in range(num_tols):
-    sim.init_fields()
+    sim.init_sim()
     sim.solve_cw(tols[i], 10000, 10)
     ez_dat[:,:,i] = sim.get_array(center=mp.Vector3(), size=mp.Vector3(sxy-2*dpml,sxy-2*dpml), component=mp.Ez)
 
@@ -58,7 +58,7 @@ plt.xlabel("frequency-domain solver tolerance");
 plt.ylabel("L2 norm of error in fields");
 plt.show()
 
-eps_data = sim.get_array(mp.Vector3(), mp.Vector3(sxy-2*dpml,sxy-2*dpml), mp.Dielectric)
+eps_data = sim.get_array(center=mp.Vector3(), size=mp.Vector3(sxy-2*dpml,sxy-2*dpml), component=mp.Dielectric)
 ez_data = np.absolute(ez_dat[:,:,num_tols-1])
 
 plt.figure(dpi=100)
@@ -79,7 +79,7 @@ The results are shown in the figure below. The error in the fields decreases mon
 ![](../images/CWsolver-python.png)
 </center>
 
-As a further validation of the frequency-domain solver, we will compare its fields with those computed using time-stepping. This involves taking the Fourier transform of $E_z$ via the `add_dft_fields` routine. At the end of the time stepping, these frequency-domain fields are then output to an HDF5 file via `output_dft`. The script is extended as follows. 
+As a further validation of the frequency-domain solver, we will compare its fields with those computed using time-stepping. This involves taking the Fourier transform of E<sub>z</sub> via the `add_dft_fields` routine. At the end of the time stepping, these frequency-domain fields are then output to an HDF5 file via `output_dft`. The script is extended as follows. 
 
 ```py
 sim.reset_meep()
@@ -93,7 +93,8 @@ sim = mp.Simulation(cell_size=mp.Vector3(sxy,sxy),
                     symmetries=[mp.Mirror(mp.Y)],
                     boundary_layers=[mp.PML(dpml)])
 
-dfts = sim.add_dft_fields([mp.Ez], mp.Volume(center=mp.Vector3(), size=mp.Vector3(sxy-2*dpml,sxy-2*dpml)), fcen, fcen, 1)
+where = mp.Volume(center=mp.Vector3(), size=mp.Vector3(sxy-2*dpml,sxy-2*dpml))
+dfts = sim.add_dft_fields([mp.Ez], fcen, fcen, 1, where=where)
 sim.run(until_after_sources=100)
 sim.output_dft(dfts, "dft_fields")
 
@@ -102,9 +103,9 @@ import h5py
 f = h5py.File("dft_fields.h5", 'r')
 ezi = f["ez_0.i"].value
 ezr = f["ez_0.r"].value
-ez_dat = ezr + 1j * ezi
+ez_dat = ezr+1j*ezi
 
-eps_data = sim.get_array(mp.Vector3(), mp.Vector3(sxy-2*dpml,sxy-2*dpml), mp.Dielectric)
+eps_data = sim.get_array(center=mp.Vector3(), size=mp.Vector3(sxy-2*dpml,sxy-2*dpml), component=mp.Dielectric)
 ez_data = np.absolute(ez_dat)
 
 plt.figure(dpi=100)
@@ -114,4 +115,4 @@ plt.axis('off')
 plt.show()
 ```
 
-The left inset of the figure above shows the magnitude of the scalar E$_z$ field, computed using the frequency-domain solver with a tolerance of 10$^{-12}$, superimposed on the ring-resonator geometry. Note the three-fold mirror symmetry of the field pattern (fundamental mode) and faint presence of the point source. The right inset is for the Fourier-transformed fields of the time-domain calculation. The results are qualitatively similar.
+The left inset of the figure above shows the magnitude of the scalar E<sub>z</sub> field, computed using the frequency-domain solver with a tolerance of 10<sup>-12</sup>, superimposed on the ring-resonator geometry. Note the three-fold mirror symmetry of the field pattern (fundamental mode) and faint presence of the point source. The right inset is for the Fourier-transformed fields of the time-domain calculation. The results are qualitatively similar.

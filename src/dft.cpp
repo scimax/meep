@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
+#include <algorithm>
 
 #include "meep.hpp"
 #include "meep_internals.hpp"
@@ -179,7 +181,7 @@ dft_chunk *fields::add_dft(component c, const volume &where,
   data.domega = Nfreq <= 1 ? 0.0 :
     (freq_max * 2*pi - data.omega_min) / (Nfreq - 1);
   data.Nomega = Nfreq;
-  data.stored_weight = stored_weight; 
+  data.stored_weight = stored_weight;
   data.extra_weight  = extra_weight;
   data.dt_factor     = dt/sqrt(2.0*pi);
   data.include_dV_and_interp_weights = include_dV_and_interp_weights;
@@ -197,7 +199,7 @@ dft_chunk *fields::add_dft(const volume_list *where,
   dft_chunk *chunks = 0;
   while (where) {
     if (is_derived(where->c)) abort("derived_component invalid for dft");
-    cdouble stored_weight = where->weight;   
+    cdouble stored_weight = where->weight;
     chunks = add_dft(component(where->c), where->v,
 		     freq_min, freq_max, Nfreq, include_dV_and_interp_weights,
 		     stored_weight, chunks);
@@ -288,7 +290,7 @@ void dft_chunk::operator-=(const dft_chunk &chunk) {
   }
 }
 
-static size_t dft_chunks_Ntotal(dft_chunk *dft_chunks, size_t *my_start) {
+size_t dft_chunks_Ntotal(dft_chunk *dft_chunks, size_t *my_start) {
   size_t n = 0;
   for (dft_chunk *cur = dft_chunks; cur; cur = cur->next_in_dft)
     n += cur->N * cur->Nomega * 2;
@@ -310,8 +312,8 @@ void save_dft_hdf5(dft_chunk *dft_chunks, const char *name, h5file *file,
 
   int istart_ = int(istart);
   for (dft_chunk *cur = dft_chunks; cur; cur = cur->next_in_dft) {
-    int Nchunk = int(cur->N * cur->Nomega * 2);
-    file->write_chunk(1, &istart_, &Nchunk, (realnum *) cur->dft);
+    size_t Nchunk = cur->N * cur->Nomega * 2;
+    file->write_chunk(1, &istart, &Nchunk, (realnum *) cur->dft);
     istart += Nchunk;
   }
   file->done_writing_chunks();
@@ -330,15 +332,15 @@ void load_dft_hdf5(dft_chunk *dft_chunks, const char *name, h5file *file,
   char dataname[1024];
   snprintf(dataname, 1024, "%s%s" "%s_dft",
 	   dprefix ? dprefix : "", dprefix && dprefix[0] ? "_" : "", name);
-  int file_rank, file_dims;
+  int file_rank;
+  size_t file_dims;
   file->read_size(dataname, &file_rank, &file_dims, 1);
-  if (file_rank != 1 || file_dims != int(n))
-    abort("incorrect dataset size (%d vs. %zd) in load_dft_hdf5 %s:%s", file_dims, n, file->file_name(), dataname);
+  if (file_rank != 1 || file_dims != n)
+    abort("incorrect dataset size (%zd vs. %zd) in load_dft_hdf5 %s:%s", file_dims, n, file->file_name(), dataname);
 
-  int istart_int = int(istart);
   for (dft_chunk *cur = dft_chunks; cur; cur = cur->next_in_dft) {
-    int Nchunk = int(cur->N * cur->Nomega * 2); // fixme: handle size_t in read_chunk
-    file->read_chunk(1, &istart_int, &Nchunk, (realnum *) cur->dft);
+    size_t Nchunk = cur->N * cur->Nomega * 2;
+    file->read_chunk(1, &istart, &Nchunk, (realnum *) cur->dft);
     istart += Nchunk;
   }
 }
@@ -348,22 +350,23 @@ void load_dft_hdf5(dft_chunk *dft_chunks, component c, h5file *file,
   load_dft_hdf5(dft_chunks, component_name(c), file, dprefix);
 }
 
-dft_flux::dft_flux(const component cE_, const component cH_,
-		   dft_chunk *E_, dft_chunk *H_,
-		   double fmin, double fmax, int Nf)
+dft_flux::dft_flux(const component cE_, const component cH_, dft_chunk *E_, dft_chunk *H_,
+		   double fmin, double fmax, int Nf, const volume &where_,
+                   direction normal_direction_, bool use_symmetry_) :
+ Nfreq(Nf), E(E_), H(H_), cE(cE_), cH(cH_), where(where_),
+ normal_direction(normal_direction_), use_symmetry(use_symmetry_)
 {
   if (Nf <= 1) fmin = fmax = (fmin + fmax) * 0.5;
   freq_min = fmin;
-  Nfreq = Nf;
   dfreq = Nf <= 1 ? 0.0 : (fmax - fmin) / (Nf - 1);
-  E = E_; H = H_;
-  cE = cE_; cH = cH_;
 }
 
-dft_flux::dft_flux(const dft_flux &f) {
+dft_flux::dft_flux(const dft_flux &f) : where(f.where) {
   freq_min = f.freq_min; Nfreq = f.Nfreq; dfreq = f.dfreq;
   E = f.E; H = f.H;
   cE = f.cE; cH = f.cH;
+  normal_direction = f.normal_direction;
+  use_symmetry=f.use_symmetry;
 }
 
 double *dft_flux::flux() {
@@ -413,11 +416,22 @@ void dft_flux::scale_dfts(complex<double> scale) {
 }
 
 dft_flux fields::add_dft_flux(const volume_list *where_,
-			      double freq_min, double freq_max, int Nfreq) {
+			      double freq_min, double freq_max, int Nfreq,
+                              bool use_symmetry)
+{
+  if (!where_) // handle empty list of volumes
+   return dft_flux(Ex, Hy, NULL, NULL, freq_min, freq_max, Nfreq, v, NO_DIRECTION, use_symmetry);
+
   dft_chunk *E = 0, *H = 0;
   component cE[2] = {Ex,Ey}, cH[2] = {Hy,Hx};
 
-  volume_list *where = S.reduce(where_);
+  // the dft_flux object needs to store the (unreduced) volume for
+  // mode-coefficient computation in mpb.cpp, but this only works
+  // when the volume_list consists of a single volume, so it suffices
+  // to store the first volume in the list.
+  volume firstvol(where_->v);
+
+  volume_list *where = use_symmetry ?  S.reduce(where_) : new volume_list(where_);
   volume_list *where_save = where;
   while (where) {
     derived_component c = derived_component(where->c);
@@ -449,7 +463,10 @@ dft_flux fields::add_dft_flux(const volume_list *where_,
   }
   delete where_save;
 
-  return dft_flux(cE[0], cH[0], E, H, freq_min, freq_max, Nfreq);
+  // if the volume list has only one entry, store its component's direction.
+  // if the volume list has > 1 entry, store NO_DIRECTION.
+  direction flux_dir = (where_->next ? NO_DIRECTION : component_direction(where_->c));
+  return dft_flux(cE[0], cH[0], E, H, freq_min, freq_max, Nfreq, firstvol, flux_dir, use_symmetry);
 }
 
 
@@ -470,12 +487,19 @@ direction fields::normal_direction(const volume &where) const {
 }
 
 dft_flux fields::add_dft_flux(direction d, const volume &where,
-			      double freq_min, double freq_max, int Nfreq) {
+			      double freq_min, double freq_max, int Nfreq,
+                              bool use_symmetry) {
   if (d == NO_DIRECTION)
     d = normal_direction(where);
   volume_list vl(where, direction_component(Sx, d));
-  return add_dft_flux(&vl, freq_min, freq_max, Nfreq);
+  dft_flux flux=add_dft_flux(&vl, freq_min, freq_max, Nfreq, use_symmetry);
+  flux.normal_direction=d;
+  return flux;
 }
+
+dft_flux fields::add_mode_monitor(direction d, const volume &where,
+                                  double freq_min, double freq_max, int Nfreq)
+{ return add_dft_flux(d,where,freq_min,freq_max,Nfreq, /*use_symmetry=*/false); }
 
 dft_flux fields::add_dft_flux_box(const volume &where,
 				  double freq_min, double freq_max, int Nfreq){
@@ -503,7 +527,8 @@ dft_flux fields::add_dft_flux_plane(const volume &where,
 
 
 dft_fields::dft_fields(dft_chunk *chunks_,
-                       double freq_min_, double freq_max_, int Nfreq_)
+                       double freq_min_, double freq_max_, int Nfreq_,
+                       const volume &where_) : where(where_)
 {
   chunks   = chunks_;
   freq_min = freq_min_;
@@ -526,7 +551,7 @@ void dft_fields::remove()
 
 dft_fields fields::add_dft_fields(component *components, int num_components,
                                   const volume where,
-                                  double freq_min, double freq_max, int Nfreq) 
+                                  double freq_min, double freq_max, int Nfreq)
 {
   bool include_dV_and_interp_weights=false;
   cdouble stored_weight=1.0;
@@ -535,28 +560,32 @@ dft_fields fields::add_dft_fields(component *components, int num_components,
    chunks = add_dft(components[nc], where, freq_min, freq_max, Nfreq,
                     include_dV_and_interp_weights, stored_weight, chunks);
 
-  return dft_fields(chunks, freq_min, freq_max, Nfreq);
+  return dft_fields(chunks, freq_min, freq_max, Nfreq, where);
 }
 
 /***************************************************************/
 /* chunk-level processing for fields::process_dft_component.   */
 /***************************************************************/
 cdouble dft_chunk::process_dft_component(int rank, direction *ds,
-                                         ivec min_corner, int num_freq,
+                                         ivec min_corner, ivec max_corner,
+                                         int num_freq,
                                          h5file *file, double *buffer, int reim,
+                                         cdouble *field_array,
                                          void *mode1_data, void *mode2_data,
                                          component c_conjugate)
 {
    /*****************************************************************/
    /* compute the size of the chunk we own and its strides etc.     */
    /*****************************************************************/
-   int start[3]={0,0,0}, count[3]={1,1,1};
-   int offset[3]={0,0,0}, stride[3]={1,1,1};
+   size_t start[3]={0,0,0};
+   size_t file_count[3]={1,1,1},  array_count[3]={1,1,1};
+   int file_offset[3]={0,0,0};
+   int file_stride[3]={1,1,1};
    ivec isS = S.transform(is, sn) + shift;
    ivec ieS = S.transform(ie, sn) + shift;
 
    ivec permute(zero_ivec(fc->gv.dim));
-   for (int i = 0; i < 3; ++i) 
+   for (int i = 0; i < 3; ++i)
     permute.set_direction(fc->gv.yucky_direction(i), i);
    permute = S.transform_unshifted(permute, sn);
    LOOP_OVER_DIRECTIONS(permute.dim, d)
@@ -566,18 +595,21 @@ cdouble dft_chunk::process_dft_component(int rank, direction *ds,
     { direction d = ds[i];
       int isd = isS.in_direction(d), ied = ieS.in_direction(d);
       start[i] = (min(isd, ied) - min_corner.in_direction(d)) / 2;
-      count[i] = abs(ied - isd) / 2 + 1;
-      if (ied < isd) offset[permute.in_direction(d)] = count[i] - 1;
-    };
+      file_count[i] = abs(ied - isd) / 2 + 1;
+      if (ied < isd)
+       file_offset[permute.in_direction(d)] = file_count[i] - 1;
+      array_count[i]= (max_corner.in_direction(d)
+	               - min_corner.in_direction(d)) / 2 + 1;
+    }
 
    for (int i = 0; i < rank; ++i)
     { direction d = ds[i];
       int j = permute.in_direction(d);
       for (int k = i + 1; k < rank; ++k)
-      stride[j] *= count[k];
-      offset[j] *= stride[j];
-      if (offset[j]) stride[j] *= -1;
-    };
+       file_stride[j] *= file_count[k];
+      file_offset[j] *= file_stride[j];
+      if (file_offset[j]) file_stride[j] *= -1;
+    }
 
    /*****************************************************************/
    /*****************************************************************/
@@ -587,7 +619,14 @@ cdouble dft_chunk::process_dft_component(int rank, direction *ds,
     { Initialize=false;
       char *s=getenv("MEEP_UNCONJUGATED_INNER_PRODUCT");
       unconjugated_inner_product = (s && s[0]=='1');
-    };
+    }
+
+   /***************************************************************/
+   /* experimential provision to look at the effect of retaining  */
+   /* the interpolation weight in the array output or HDF5 file   */
+   /***************************************************************/
+   char *s=getenv("MEEP_DFT_INTERP_WEIGHTS");
+   bool retain_dV_and_interp_weights = (s && s[0]=='1');
 
    /***************************************************************/
    /* loop over all grid points in our piece of the volume        */
@@ -606,17 +645,37 @@ cdouble dft_chunk::process_dft_component(int rank, direction *ds,
 
       cdouble mode1val=0.0, mode2val=0.0;
       if (mode1_data)
-       mode1val=eigenmode_amplitude(mode1_data,loc,c_conjugate);
+       mode1val=eigenmode_amplitude(mode1_data,loc,S.transform(c_conjugate,sn));
       if (mode2_data)
-       mode2val=eigenmode_amplitude(mode2_data,loc,c);
+       mode2val=eigenmode_amplitude(mode2_data,loc,S.transform(c,sn));
 
       if (file)
-       { int idx2 = ((((offset[0] + offset[1] + offset[2])
-                                  + loop_i1 * stride[0])
-                                  + loop_i2 * stride[1])
-                                  + loop_i3 * stride[2]);
+       { int idx2 = ((((file_offset[0] + file_offset[1] + file_offset[2])
+                                  + loop_i1 * file_stride[0])
+                                  + loop_i2 * file_stride[1])
+                                  + loop_i3 * file_stride[2]);
+
+         if (retain_dV_and_interp_weights) dft_val*=w;
+
          cdouble val = (mode1_data ? mode1val : dft_val);
          buffer[idx2] = reim ? imag(val) : real(val);
+       }
+      else if (field_array)
+       {
+         IVEC_LOOP_ILOC(fc->gv, iloc);         // iloc <-- indices of parent point in Yee grid
+         iloc = S.transform(iloc, sn) + shift; // iloc <-- indices of child point in Yee grid
+         iloc -= min_corner;                   // iloc <-- 2*(indices of point in DFT array)
+
+         // the index of point n1 or (n1,n2) or (n1,n2,n3) in a 1D, 2D, or 3D array is
+         // (for a 1D array) n1
+         // (for a 2D array) n2 + n1*N2
+         // (for a 3D array) n3 + n2*N3 + n1*N2*N3
+         // where NI = number of points in Ith direction.
+         int idx2=0;
+         for (int i=rank-1, stride=1; i>=0; stride*=array_count[i--])
+          idx2 += stride * (iloc.in_direction(ds[i]) / 2);
+
+         field_array[idx2] = (retain_dV_and_interp_weights ? w : 1.0) * dft_val;
        }
       else
        { if (unconjugated_inner_product==false)
@@ -625,15 +684,14 @@ cdouble dft_chunk::process_dft_component(int rank, direction *ds,
           integral += w*mode1val*mode2val;
          else
           integral += w*mode1val*dft_val;
-       };
+       }
 
-    }; // LOOP_OVER_IVECS(fc->gv, is, ie, idx)
+    } // LOOP_OVER_IVECS(fc->gv, is, ie, idx)
 
   if (file)
-   file->write_chunk(rank, start, count, buffer);
+   file->write_chunk(rank, start, file_count, buffer);
 
   return integral;
-
 }
 
 /***************************************************************/
@@ -654,8 +712,14 @@ cdouble dft_chunk::process_dft_component(int rank, direction *ds,
 /*      (B) mode field component c for the eigenmode described */
 /*          by mode_data1 (if it is non-null)                  */
 /*                                                             */
-/*  2. if HDF5FileName is null: compute and return an          */
-/*     overlap integral between                                */
+/*  2. if HDF5FileName is null but pfield_array is non-null:   */
+/*     set *pfield_array equal to a newly allocated buffer     */
+/*     populated on return with values of DFT field component  */
+/*     c, equivalent to writing the data to HDF5 and reading   */
+/*     it back into field_array                                */
+/*                                                             */
+/*  3. if both HDF5FileName and field_array are null: compute  */
+/*     and return an  overlap integral between                 */
 /*      (A) the DFT fields and the fields of the eigenmode     */
 /*          described by mode_data1 (if mode_data2 is null)    */
 /*      (B) the eigenmode fields described by mode_data1       */
@@ -673,21 +737,22 @@ cdouble dft_chunk::process_dft_component(int rank, direction *ds,
 cdouble fields::process_dft_component(dft_chunk **chunklists, int num_chunklists,
                                       int num_freq, component c,
                                       const char *HDF5FileName,
+                                      cdouble **pfield_array,
+                                      int *array_rank, int *array_dims,
                                       void *mode1_data, void *mode2_data,
                                       component c_conjugate,
-                                      const volume *where,
                                       bool *first_component)
-{ 
+{
   /***************************************************************/
   /* get statistics on the volume slice **************************/
   /***************************************************************/
-  if (where==0) where=&v; // default to full volume of fields
+  volume *where=&v; // use full volume of fields
   size_t bufsz=0;
   ivec min_corner = gv.round_vec(where->get_max_corner()) + one_ivec(gv.dim);
   ivec max_corner = gv.round_vec(where->get_min_corner()) - one_ivec(gv.dim);
   for (int ncl=0; ncl<num_chunklists; ncl++)
    for (dft_chunk *chunk=chunklists[ncl]; chunk; chunk=chunk->next_in_dft)
-    { 
+    {
       if (chunk->c!=c) continue;
       ivec isS = chunk->S.transform(chunk->is, chunk->sn) + chunk->shift;
       ivec ieS = chunk->S.transform(chunk->ie, chunk->sn) + chunk->shift;
@@ -697,24 +762,31 @@ cdouble fields::process_dft_component(dft_chunk **chunklists, int num_chunklists
       LOOP_OVER_DIRECTIONS(chunk->fc->gv.dim, d)
        this_bufsz *= (chunk->ie.in_direction(d) - chunk->is.in_direction(d)) / 2 + 1;
       bufsz = max(bufsz, this_bufsz);
-    };
+    }
   max_corner = max_to_all(max_corner);
   min_corner = -max_to_all(-min_corner); // i.e., min_to_all
 
   /***************************************************************/
   /***************************************************************/
   /***************************************************************/
-  int rank = 0, dims[3];
+  int rank = 0;
+  size_t dims[3];
   direction ds[3];
+  size_t array_size=1;
   LOOP_OVER_DIRECTIONS(gv.dim, d) {
     if (rank >= 3) abort("too many dimensions in process_dft_component");
-    int n = (max_corner.in_direction(d)
-	     - min_corner.in_direction(d)) / 2 + 1;
+    size_t n = std::max(0, (max_corner.in_direction(d) - min_corner.in_direction(d)) / 2 + 1);
+
     if (n > 1) {
       ds[rank] = d;
       dims[rank++] = n;
+      array_size *= n;
     }
   }
+  if (array_rank)
+   { *array_rank=rank;
+     for(int d=0; d<rank; d++) array_dims[d]=dims[d];
+   }
   if (rank==0) return 0.0; // no chunks with the specified component on this processor
 
   /***************************************************************/
@@ -722,17 +794,20 @@ cdouble fields::process_dft_component(dft_chunk **chunklists, int num_chunklists
   /* like h5_output_data::buf in h5fields.cpp                    */
   /***************************************************************/
   realnum *buffer = 0;
+  cdouble *field_array = 0;
   int reim_max = 0;
   if(HDF5FileName)
    { buffer   = new realnum[bufsz];
      reim_max = 1;
-   };
+   }
+  else if (pfield_array)
+   *pfield_array = field_array = new cdouble[array_size];
 
   bool append_data      = false;
   bool single_precision = false;
   cdouble overlap=0.0;
   for(int reim=0; reim<=reim_max; reim++)
-   { 
+   {
      h5file *file=0;
      if (HDF5FileName)
       { file = open_h5file(HDF5FileName, (*first_component) ? h5file::WRITE : h5file::READWRITE);
@@ -740,22 +815,42 @@ cdouble fields::process_dft_component(dft_chunk **chunklists, int num_chunklists
         char dataname[100];
         snprintf(dataname,100,"%s_%i.%c",component_name(c),num_freq, reim ? 'i' : 'r');
         file->create_or_extend_data(dataname, rank, dims, append_data, single_precision);
-      };
+      }
 
      for (int ncl=0; ncl<num_chunklists; ncl++)
       for (dft_chunk *chunk=chunklists[ncl]; chunk; chunk=chunk->next_in_dft)
        if (chunk->c==c)
         overlap
-         +=chunk->process_dft_component(rank, ds, min_corner, num_freq,
-                                        file, buffer, reim,
-                                        mode1_data, mode2_data, c_conjugate);
+         +=chunk->process_dft_component(rank, ds, min_corner, max_corner, num_freq, file,
+                                        buffer, reim, field_array, mode1_data, mode2_data,
+                                        c_conjugate);
 
      if (HDF5FileName)
       { file->done_writing_chunks();
         file->prevent_deadlock(); // hackery
         delete file;
       }
-   }
+     else if (field_array)
+      {
+        /***************************************************************/
+        /* repeatedly call sum_to_all to consolidate full field array  */
+        /* on all cores                                                */
+        /***************************************************************/
+        #define BUFSIZE 1<<16 // use 64k buffer
+        cdouble *buf = new cdouble[BUFSIZE];
+        ptrdiff_t offset=0;
+        size_t remaining=array_size;
+        while(remaining!=0)
+         {
+           size_t size = (remaining > BUFSIZE ? BUFSIZE : remaining);
+           sum_to_all(field_array + offset, buf, size);
+           memcpy(field_array + offset, buf, size*sizeof(cdouble));
+           remaining-=size;
+           offset+=size;
+         }
+        delete[] buf;
+      }
+   } // for(int reim=0; reim<=reim_max; reim++)
 
   if (HDF5FileName)
    delete[] buffer;
@@ -766,57 +861,227 @@ cdouble fields::process_dft_component(dft_chunk **chunklists, int num_chunklists
 }
 
 /***************************************************************/
+/***************************************************************/
+/***************************************************************/
+bool increment(int n[3], int nMax[3], int rank)
+{ for(rank--; rank>=0; rank--)
+   if ( ++n[rank] < nMax[rank] )
+    return false;
+   else
+    n[rank]=0;
+  return true;
+}
+
+cdouble *collapse_empty_dimensions(cdouble *array, int *rank, int dims[3], volume dft_volume)
+{
+  /*--------------------------------------------------------------*/
+  /*- detect empty dimensions and compute rank and strides for    */
+  /*- collapsed array                                             */
+  /*--------------------------------------------------------------*/
+  int full_rank = *rank;
+  if (full_rank==0) return array;
+
+  int reduced_rank=0, reduced_dims[3], reduced_stride[3]={1,1,1}, nd=0;
+  LOOP_OVER_DIRECTIONS(dft_volume.dim, d)
+   { int dim = dims[nd++];
+     if (dim==0) continue;
+     if (dft_volume.in_direction(d) == 0.0)
+      reduced_stride[nd-1]=0;    // degenerate dimension, to be collapsed
+     else
+      reduced_dims[reduced_rank++]=dim;
+   }
+  if (reduced_rank==full_rank) return array; // nothing to collapse
+
+  /*--------------------------------------------------------------*/
+  /*- set up strides into full and reduced arrays                 */
+  /*--------------------------------------------------------------*/
+  int stride[3]={1,1,1}; // non-reduced array strides
+  if (full_rank==2)
+   stride[0]=dims[1];     // rstride is already all set in this case
+  else if (full_rank==3)
+   { stride[0] = dims[1]*dims[2];
+     stride[1] = dims[2];
+     if (reduced_stride[0]!=0)
+      reduced_stride[0]=reduced_dims[1];
+     else if (reduced_stride[1]!=0)
+      reduced_stride[1]=reduced_dims[1];
+     // else: two degenerate dimensions->reduced array is 1-diml, no strides needed
+   }
+
+  /*--------------------------------------------------------------*/
+  /*- allocate reduced array and compress full array into it     -*/
+  /*--------------------------------------------------------------*/
+  int reduced_size = reduced_dims[0] * (reduced_rank==2 ? reduced_dims[1] : 1);
+  cdouble *reduced_array = new cdouble[reduced_size];
+  if (!reduced_array) abort("%s:%i: out of memory (%i)",__FILE__,__LINE__,reduced_size);
+  memset(reduced_array,0,reduced_size*sizeof(cdouble));
+
+  int n[3]={0,0,0};
+  do
+   { int  index = n[0]*stride[0]         + n[1]*stride[1]         + n[2]*stride[2];
+     int rindex = n[0]*reduced_stride[0] + n[1]*reduced_stride[1] + n[2]*reduced_stride[2];
+     reduced_array[rindex] += array[index];
+   } while ( !increment(n,dims,full_rank) );
+
+  *rank = reduced_rank;
+  dims[0] = reduced_dims[0];
+  if (reduced_rank==2) dims[1]=reduced_dims[1];
+  delete[] array;
+  return reduced_array;
+}
+
+/***************************************************************/
+/* routines for fetching arrays of dft fields                  */
+/***************************************************************/
+cdouble *fields::get_dft_array(dft_flux flux, component c, int num_freq, int *rank, int dims[3])
+{
+  dft_chunk *chunklists[2];
+  chunklists[0] = flux.E;
+  chunklists[1] = flux.H;
+  cdouble *array;
+  process_dft_component(chunklists, 2, num_freq, c, 0, &array, rank, dims);
+  return collapse_empty_dimensions(array, rank, dims, flux.where);
+}
+
+cdouble *fields::get_dft_array(dft_force force, component c, int num_freq, int *rank, int dims[3])
+{
+  dft_chunk *chunklists[3];
+  chunklists[0] = force.offdiag1;
+  chunklists[1] = force.offdiag2;
+  chunklists[2] = force.diag;
+  cdouble *array;
+  process_dft_component(chunklists, 3, num_freq, c, 0, &array, rank, dims);
+  return collapse_empty_dimensions(array, rank, dims, force.where);
+}
+
+cdouble *fields::get_dft_array(dft_near2far n2f, component c, int num_freq, int *rank, int dims[3])
+{
+  dft_chunk *chunklists[1];
+  chunklists[0] = n2f.F;
+  cdouble *array;
+  process_dft_component(chunklists, 1, num_freq, c, 0, &array, rank, dims);
+  return collapse_empty_dimensions(array, rank, dims, n2f.where);
+}
+
+cdouble *fields::get_dft_array(dft_fields fdft, component c, int num_freq, int *rank, int dims[3])
+{
+  dft_chunk *chunklists[1];
+  chunklists[0] = fdft.chunks;
+  cdouble *array;
+  process_dft_component(chunklists, 1, num_freq, c, 0, &array, rank, dims);
+  return collapse_empty_dimensions(array, rank, dims, fdft.where);
+}
+
+/***************************************************************/
 /* wrapper around process_dft_component that writes HDF5       */
 /* datasets for all components at all frequencies stored in    */
 /* the given collection of DFT chunks                          */
 /***************************************************************/
 void fields::output_dft_components(dft_chunk **chunklists, int num_chunklists,
-                                   const char *HDF5FileName, const volume *where)
+                                   volume dft_volume, const char *HDF5FileName)
 {
   int NumFreqs=0;
   for(int nc=0; nc<num_chunklists && NumFreqs==0; nc++)
    if (chunklists[nc])
     NumFreqs = chunklists[nc]->Nomega;
 
+  // if the volume has zero thickness in one or more directions, the DFT
+  // grid is two pixels thick in those directions, but we want the HDF5 output
+  // to be just one pixel thick in those directions. solution: first get the
+  // fields in array form (as get_dft_array), then collapse degenerate dimensions
+  // and export the collapsed array to HDF5. in this case the max_to_all() below
+  // is needed to make sure everybody agrees on how many frequencies there are,
+  // because some processes' field chunks may have no overlap with dft_volume,
+  // in which case those processes will think NumFreqs==0.
+  bool have_empty_dims=false;
+  LOOP_OVER_DIRECTIONS(dft_volume.dim, d)
+   if (dft_volume.in_direction(d)==0.0)
+    have_empty_dims=true;
+
+  h5file *file=0;
+  if ( have_empty_dims && am_master() )
+   { char filename[100];
+     snprintf(filename,100,"%s%s",HDF5FileName,strstr("%.h5",HDF5FileName) ? "" : ".h5");
+     file = new h5file(filename,h5file::WRITE, false /*parallel*/ );
+   }
+  if (have_empty_dims)
+   NumFreqs = max_to_all( NumFreqs ); // subtle!
+
   bool first_component=true;
   for(int num_freq=0; num_freq<NumFreqs; num_freq++)
    FOR_E_AND_H(c)
-    process_dft_component(chunklists, num_chunklists, num_freq, c, HDF5FileName,
-                          0, 0, Ex, where, &first_component);
+    if (!have_empty_dims)
+     {
+        process_dft_component(chunklists, num_chunklists, num_freq, c, HDF5FileName,
+                              0, 0, 0, 0, 0, Ex, &first_component);
+     }
+    else
+     { cdouble *array=0;
+       int rank, dims[3];
+       process_dft_component(chunklists, num_chunklists, num_freq, c, 0, &array, &rank, dims);
+       if ( rank>0 && am_master() )
+        {
+          array=collapse_empty_dimensions(array, &rank, dims, dft_volume);
+          if (rank==0) abort("%s:%i: internal error",__FILE__,__LINE__);
+          size_t stdims[2];
+          stdims[0] = (size_t) dims[0];
+          stdims[1] = (size_t) ( (rank>1) ? dims[1] : 1);
+          size_t array_size = stdims[0] * stdims[1];
+          double *real_array = new double[array_size];
+          if (!real_array) abort("%s:%i:out of memory(%lu)",__FILE__,__LINE__,array_size);
+          for(int reim=0; reim<2; reim++)
+           {
+             for(size_t n=0; n<array_size; n++)
+              real_array[n] = (reim==0 ? real(array[n]) : imag(array[n]));
+             char dataname[100], filename[100];
+             snprintf(dataname,100,"%s_%i.%c",component_name(c),num_freq, reim ? 'i' : 'r');
+             snprintf(filename,100,"%s%s",HDF5FileName,strstr(".h5",HDF5FileName) ? "" : ".h5");
+             bool single_precision=false;
+             file->write(dataname, rank, stdims, real_array, single_precision);
+           }
+          delete[] real_array;
+        }
+       if (array) delete[] array;
+     }
+  if (file) delete file;
 }
 
-void fields::output_dft(dft_flux flux, const char *HDF5FileName, const volume *where)
-{ 
+void fields::output_dft(dft_flux flux, const char *HDF5FileName)
+{
   dft_chunk *chunklists[2];
   chunklists[0] = flux.E;
   chunklists[1] = flux.H;
-  output_dft_components(chunklists, 2, HDF5FileName, where);
+  output_dft_components(chunklists, 2, flux.where, HDF5FileName);
 }
 
-void fields::output_dft(dft_force force, const char *HDF5FileName, const volume *where)
+void fields::output_dft(dft_force force, const char *HDF5FileName)
 {
   dft_chunk *chunklists[3];
   chunklists[0] = force.offdiag1;
   chunklists[1] = force.offdiag2;
   chunklists[2] = force.diag;
-  output_dft_components(chunklists, 3, HDF5FileName, where);
+  output_dft_components(chunklists, 3, force.where, HDF5FileName);
 }
 
-void fields::output_dft(dft_near2far n2f, const char *HDF5FileName, const volume *where)
+void fields::output_dft(dft_near2far n2f, const char *HDF5FileName)
 { dft_chunk *chunklists[1];
   chunklists[0] = n2f.F;
-  output_dft_components(chunklists, 1, HDF5FileName, where);
+  output_dft_components(chunklists, 1, n2f.where, HDF5FileName);
 }
 
-void fields::output_dft(dft_fields fields, const char *HDF5FileName, const volume *where)
+void fields::output_dft(dft_fields fdft, const char *HDF5FileName)
 {
   dft_chunk *chunklists[1];
-  chunklists[0] = fields.chunks;
-  output_dft_components(chunklists, 1, HDF5FileName, where);
+  chunklists[0] = fdft.chunks;
+  output_dft_components(chunklists, 1, fdft.where, HDF5FileName);
 }
 
+/***************************************************************/
+/* does the same thing as output_dft(flux ...), but using      */
+/* eigenmode fields instead of dft_flux fields.                */
+/***************************************************************/
 void fields::output_mode_fields(void *mode_data, dft_flux flux,
-                                const char *HDF5FileName, const volume *where)
+                                const char *HDF5FileName)
 {
   h5file *file = open_h5file(HDF5FileName, h5file::WRITE);
   delete file;
@@ -825,18 +1090,17 @@ void fields::output_mode_fields(void *mode_data, dft_flux flux,
   chunklists[0] = flux.E;
   chunklists[1] = flux.H;
   FOR_E_AND_H(c)
-   process_dft_component(chunklists, 2, 0, c, 0, mode_data, 0, c, where);
+   process_dft_component(chunklists, 2, 0, c, 0, 0, 0, 0, mode_data, 0, c);
 }
 
 /***************************************************************/
 /***************************************************************/
 /***************************************************************/
 void fields::get_overlap(void *mode1_data, void *mode2_data, dft_flux flux,
-                         int num_freq, direction normal_dir,
-                         cdouble overlaps[2], volume *where)
+                         int num_freq, cdouble overlaps[2])
 {
   component cE[2], cH[2];
-  switch (normal_dir)
+  switch (flux.normal_direction)
    { case X: cE[0] = Ey; cH[0] = Hz; cE[1] = Ez; cH[1] = Hy; break;
      case Y: cE[0] = Ez; cH[0] = Hx; cE[1] = Ex; cH[1] = Hz; break;
      case R: cE[0] = Ep; cH[0] = Hz; cE[1] = Ez; cH[1] = Hp; break;
@@ -844,44 +1108,41 @@ void fields::get_overlap(void *mode1_data, void *mode2_data, dft_flux flux,
      case Z: if (gv.dim == Dcyl)
 	      cE[0] = Er, cE[1] = Ep, cH[0] = Hp, cH[1] = Hr;
              else
-	      cE[0] = Ex, cE[1] = Ey, cH[0] = Hy, cH[1] = Hx; 
+	      cE[0] = Ex, cE[1] = Ey, cH[0] = Hy, cH[1] = Hx;
 	     break;
-     default: abort("invalid normal_dir in get_overlap");
+     default: abort("invalid normal_direction in get_overlap");
    };
 
   dft_chunk *chunklists[2];
   chunklists[0] = flux.E;
   chunklists[1] = flux.H;
   cdouble ExHy = process_dft_component(chunklists, 2, num_freq,
-                                       cE[0], 0, mode1_data, mode2_data,
-                                       cH[0], where);
+                                       cE[0], 0, 0, 0, 0, mode1_data, mode2_data,
+                                       cH[0]);
   cdouble EyHx = process_dft_component(chunklists, 2, num_freq,
-                                       cE[1], 0, mode1_data, mode2_data,
-                                       cH[1], where);
+                                       cE[1], 0, 0, 0, 0, mode1_data, mode2_data,
+                                       cH[1]);
   cdouble HyEx = process_dft_component(chunklists, 2, num_freq,
-                                       cH[0], 0, mode1_data, mode2_data,
-                                       cE[0], where);
+                                       cH[0], 0, 0, 0, 0, mode1_data, mode2_data,
+                                       cE[0]);
   cdouble HxEy = process_dft_component(chunklists, 2, num_freq,
-                                       cH[1], 0, mode1_data, mode2_data,
-                                       cE[1], where);
+                                       cH[1], 0, 0, 0, 0, mode1_data, mode2_data,
+                                       cE[1]);
   overlaps[0] = ExHy - EyHx;
   overlaps[1] = HyEx - HxEy;
 }
 
 void fields::get_mode_flux_overlap(void *mode_data, dft_flux flux, int num_freq,
-                                   direction normal_dir,
-                                   std::complex<double>overlaps[2],
-                                   volume *where)
-{ 
-  get_overlap(mode_data, 0, flux, num_freq, normal_dir, overlaps, where); 
+                                   std::complex<double>overlaps[2])
+{
+  get_overlap(mode_data, 0, flux, num_freq, overlaps);
 }
 
 void fields::get_mode_mode_overlap(void *mode1_data, void *mode2_data,
-                                   dft_flux flux, direction normal_dir,
-                                   std::complex<double>overlaps[2],
-                                   volume *where)
-{ 
- get_overlap(mode1_data, mode2_data, flux, 0, normal_dir, overlaps, where); 
+                                   dft_flux flux,
+                                   std::complex<double>overlaps[2])
+{
+  get_overlap(mode1_data, mode2_data, flux, 0, overlaps);
 }
 
 } // namespace meep

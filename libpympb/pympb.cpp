@@ -29,17 +29,7 @@
           int xyz_index = ((i2_ * n1 + i1) * n3 + i3);
 #  endif /* HAVE_MPI */
 
-#ifdef CASSIGN_MULT
-  #undef CASSIGN_MULT
-#endif
-
-/* a = b * c */
-#define CASSIGN_MULT(a, b, c) { \
-  mpb_real bbbb_re = (b).re, bbbb_im = (b).im; \
-  mpb_real cccc_re = (c).re, cccc_im = (c).im; \
-  CASSIGN_SCALAR(a, bbbb_re * cccc_re - bbbb_im * cccc_im, \
-                 bbbb_re * cccc_im + bbbb_im * cccc_re); \
-}
+typedef  mpb_real real;
 
 // TODO: Support MPI
 #define mpi_allreduce(sb, rb, n, ctype, t, op, comm) { \
@@ -212,7 +202,11 @@ mode_solver::mode_solver(int num_bands,
                          bool negative_epsilon_ok,
                          std::string epsilon_input_file,
                          std::string mu_input_file,
-                         bool force_mu):
+                         bool force_mu,
+                         bool use_simple_preconditioner,
+                         vector3 grid_size,
+                         int eigensolver_nwork,
+                         int eigensolver_block_size):
   num_bands(num_bands),
   parity(parity),
   target_freq(target_freq),
@@ -222,8 +216,10 @@ mode_solver::mode_solver(int num_bands,
   epsilon_input_file(epsilon_input_file),
   mu_input_file(mu_input_file),
   force_mu(force_mu),
-  eigensolver_nwork(3),
-  eigensolver_block_size(-11),
+  use_simple_preconditioner(use_simple_preconditioner),
+  grid_size(grid_size),
+  eigensolver_nwork(eigensolver_nwork),
+  eigensolver_block_size(eigensolver_block_size),
   last_parity(-2),
   iterations(0),
   eigensolver_flops(flops),
@@ -254,6 +250,14 @@ mode_solver::mode_solver(int num_bands,
   }
 
   default_material = _default_material;
+
+#ifndef WITH_HERMITIAN_EPSILON
+  meep_geom::medium_struct *m;
+  if (meep_geom::is_medium(default_material, &m)) {
+    meep_geom::check_offdiag(m);
+  }
+#endif
+
   geometry = geom;
 
   // `init` is called in the constructor to avoid the need to copy the
@@ -552,6 +556,13 @@ void mode_solver::material_epsmu(meep_geom::material_type material, symmetric_ma
 
   meep_geom::material_data *md = material;
 
+#ifndef WITH_HERMITIAN_EPSILON
+  if (md->which_subclass == meep_geom::material_data::MATERIAL_USER ||
+      md->which_subclass == meep_geom::material_data::MATERIAL_FILE) {
+      meep_geom::check_offdiag(&md->medium);
+  }
+#endif
+
   if (eps) {
     switch (md->which_subclass) {
       case meep_geom::material_data::MEDIUM:
@@ -568,9 +579,9 @@ void mode_solver::material_epsmu(meep_geom::material_type material, symmetric_ma
         epsmu->m12.re = md->medium.epsilon_offdiag.z.re;
         epsmu->m12.im = md->medium.epsilon_offdiag.z.im;
 #else
-        epsmu->m01 = md->medium.epsilon_offdiag.x;
-        epsmu->m02 = md->medium.epsilon_offdiag.y;
-        epsmu->m12 = md->medium.epsilon_offdiag.z;
+        epsmu->m01 = md->medium.epsilon_offdiag.x.re;
+        epsmu->m02 = md->medium.epsilon_offdiag.y.re;
+        epsmu->m12 = md->medium.epsilon_offdiag.z.re;
 #endif
         maxwell_sym_matrix_invert(epsmu_inv, epsmu);
         break;
@@ -624,9 +635,9 @@ void mode_solver::material_epsmu(meep_geom::material_type material, symmetric_ma
         epsmu->m12.re = md->medium.mu_offdiag.z.re;
         epsmu->m12.im = md->medium.mu_offdiag.z.im;
 #else
-        epsmu->m01 = md->medium.mu_offdiag.x;
-        epsmu->m02 = md->medium.mu_offdiag.y;
-        epsmu->m12 = md->medium.mu_offdiag.z;
+        epsmu->m01 = md->medium.mu_offdiag.x.re;
+        epsmu->m02 = md->medium.mu_offdiag.y.re;
+        epsmu->m12 = md->medium.mu_offdiag.z.re;
 #endif
         maxwell_sym_matrix_invert(epsmu_inv, epsmu);
         break;
@@ -708,9 +719,9 @@ bool mode_solver::using_mu() {
 void mode_solver::init(int p, bool reset_fields) {
   int have_old_fields = 0;
 
-  n[0] = std::max(resolution[0] * std::ceil(geometry_lattice.size.x), 1.0);
-  n[1] = std::max(resolution[1] * std::ceil(geometry_lattice.size.y), 1.0);
-  n[2] = std::max(resolution[2] * std::ceil(geometry_lattice.size.z), 1.0);
+  n[0] = grid_size.x;
+  n[1] = grid_size.y;
+  n[2] = grid_size.z;
 
   if (target_freq != 0.0) {
     meep::master_printf("Target frequency is %g\n", target_freq);
@@ -806,9 +817,9 @@ void mode_solver::init(int p, bool reset_fields) {
 }
 
 void mode_solver::init_epsilon() {
-  int no_size_x = geometry_lattice.size.x == 0 ? 1 : geometry_lattice.size.x;
-  int no_size_y = geometry_lattice.size.y == 0 ? 1 : geometry_lattice.size.y;
-  int no_size_z = geometry_lattice.size.z == 0 ? 1 : geometry_lattice.size.z;
+  mpb_real no_size_x = geometry_lattice.size.x == 0 ? 1 : geometry_lattice.size.x;
+  mpb_real no_size_y = geometry_lattice.size.y == 0 ? 1 : geometry_lattice.size.y;
+  mpb_real no_size_z = geometry_lattice.size.z == 0 ? 1 : geometry_lattice.size.z;
 
   meep::master_printf("Mesh size is %d.\n", mesh_size);
 
@@ -838,6 +849,14 @@ void mode_solver::init_epsilon() {
   meep::master_printf("Geometric objects:\n");
   if (meep::am_master()) {
     for (int i = 0; i < geometry.num_items; ++i) {
+
+#ifndef WITH_HERMITIAN_EPSILON
+      meep_geom::medium_struct *mm;
+      if (meep_geom::is_medium(geometry.items[i].material, &mm)) {
+        meep_geom::check_offdiag(mm);
+      }
+#endif
+
       display_geometric_object_info(5, geometry.items[i]);
 
       // meep_geom::medium_struct *mm;
@@ -943,9 +962,9 @@ bool mode_solver::material_has_mu(void *mt) {
       has_nonzero_mu_offdiag = true;
     }
 #else
-    if (m->mu_offdiag.x != 0 ||
-        m->mu_offdiag.y != 0 ||
-        m->mu_offdiag.z != 0) {
+    if (m->mu_offdiag.x.re != 0 ||
+        m->mu_offdiag.y.re != 0 ||
+        m->mu_offdiag.z.re != 0) {
       has_nonzero_mu_offdiag = true;
     }
 #endif
@@ -1119,14 +1138,11 @@ void mode_solver::solve_kpoint(vector3 kvector) {
     }
 
     if (mtdata) {  /* solving for bands near a target frequency */
-      // TODO
-      // if (eigensolver_davidsonp) {
-      // }
       CHECK(mdata->mu_inv==NULL, "targeted solver doesn't handle mu");
-      // TODO: simple_preconditionerp ? maxwell_target_preconditioner : maxwell_target_preconditioner2
-      eigensolver(Hblock, eigvals.data() + ib, maxwell_target_operator, (void *)mtdata,
-                  NULL, NULL, maxwell_target_preconditioner2, (void *)mtdata,
-                  evectconstraint_chain_func, (void *)constraints, W, nwork_alloc,
+
+      eigensolver(Hblock, eigvals.data() + ib, maxwell_target_operator, (void *)mtdata, NULL, NULL,
+                  use_simple_preconditioner ? maxwell_target_preconditioner : maxwell_target_preconditioner2,
+                  (void *)mtdata, evectconstraint_chain_func, (void *)constraints, W, nwork_alloc,
                   tolerance, &num_iters, flags);
 
       // now, diagonalize the real Maxwell operator in the solution subspace to
@@ -1135,15 +1151,11 @@ void mode_solver::solve_kpoint(vector3 kvector) {
       eigensolver_get_eigenvals(Hblock, eigvals.data() + ib, maxwell_operator, mdata, W[0], W[1]);
     }
     else {
-      // TODO
-      // if (eigensolver_davidsonp) {
-      // }
-
       eigensolver(Hblock, eigvals.data() + ib, maxwell_operator, (void *) mdata,
                   mdata->mu_inv ? maxwell_muinv_operator : NULL, (void *) mdata,
-                  maxwell_preconditioner2, (void *) mdata, evectconstraint_chain_func,
-                  (void *) constraints, W, nwork_alloc, tolerance, &num_iters,
-                  flags);
+                  use_simple_preconditioner ? maxwell_preconditioner : maxwell_preconditioner2,
+                  (void *) mdata, evectconstraint_chain_func, (void *) constraints,
+                  W, nwork_alloc, tolerance, &num_iters, flags);
     }
 
     if (Hblock.data != H.data) {  /* save solutions of current block */
@@ -1877,9 +1889,11 @@ cvector3 mode_solver::get_field_point(vector3 p) {
   return F;
 }
 
-void mode_solver::multiply_bloch_phase() {
+void mode_solver::multiply_bloch_phase(std::complex<double> *cdata) {
 
   std::vector<mpb_real> kvector = get_output_k();
+
+  scalar_complex *data = cdata ? (scalar_complex*)cdata : (scalar_complex*)curfield;
 
   int dims[] = {mdata->nx, mdata->ny, mdata->nz};
   int local_dims[] = {mdata->local_nx, mdata->ny, mdata->nz};
@@ -1932,9 +1946,9 @@ void mode_solver::multiply_bloch_phase() {
 
         for (int component = 0; component < 3; ++component) {
           int ijkc = ijk + component;
-          re = curfield[ijkc].re; im = curfield[ijkc].im;
-          curfield[ijkc].re = re * p_re - im * p_im;
-          curfield[ijkc].im = im * p_re + re * p_im;
+          re = data[ijkc].re; im = data[ijkc].im;
+          data[ijkc].re = re * p_re - im * p_im;
+          data[ijkc].im = im * p_re + re * p_im;
         }
       }
     }
@@ -2252,7 +2266,7 @@ std::vector<mpb_real> mode_solver::compute_group_velocity_component(vector3 d) {
 mpb_real mode_solver::compute_1_group_velocity_component(vector3 d, int b) {
   mpb_real u[3];
   int ib = b - 1;
-  mpb_real group_v;
+  mpb_real group_v = 0;
   mpb_real scratch;
 
   curfield_reset();
@@ -2398,6 +2412,94 @@ double mode_solver::compute_energy_in_objects(geometric_object_list objects) {
   return energy_sum;
 }
 
+cnumber mode_solver::compute_field_integral(field_integral_func field_func,
+                                            field_integral_energy_func energy_func,
+                                            void *py_func) {
+  mpb_real *energy = (mpb_real *) curfield;
+  cnumber integral = {0,0};
+  vector3 kvector = {0,0,0};
+
+  if (!curfield || !strchr("dhbeDHBRcv", curfield_type)) {
+    meep::master_fprintf(stderr, "The D or H energy/field must be loaded first.\n");
+    return integral;
+  }
+
+  if (curfield_type != 'v') {
+    kvector = cur_kvector;
+  }
+
+  int integrate_energy = strchr("DHBR", curfield_type) != NULL;
+
+  int n1 = mdata->nx;
+  int n2 = mdata->ny;
+  int n3 = mdata->nz;
+
+  mpb_real latx = geometry_lattice.size.x == 0 ? 1e-20 : geometry_lattice.size.x;
+  mpb_real laty = geometry_lattice.size.y == 0 ? 1e-20 : geometry_lattice.size.y;
+  mpb_real latz = geometry_lattice.size.z == 0 ? 1e-20 : geometry_lattice.size.z;
+
+  mpb_real s1 = latx / n1;
+  mpb_real s2 = laty / n2;
+  mpb_real s3 = latz / n3;
+  mpb_real c1 = n1 <= 1 ? 0 : latx * 0.5;
+  mpb_real c2 = n2 <= 1 ? 0 : laty * 0.5;
+  mpb_real c3 = n3 <= 1 ? 0 : latz * 0.5;
+
+  LOOP_XYZ(mdata) {
+    mpb_real epsilon = mean_medium_from_matrix(mdata->eps_inv + xyz_index);
+
+    vector3 p;
+    p.x = i1 * s1 - c1;
+    p.y = i2 * s2 - c2;
+    p.z = i3 * s3 - c3;
+
+    if (integrate_energy) {
+        integral.re += energy_func(energy[xyz_index], epsilon, p, py_func);
+    }
+    else {
+      double phase_phi = TWOPI *
+        (kvector.x * (p.x / latx) +
+        kvector.y * (p.y / laty) +
+        kvector.z * (p.z / latz));
+
+      scalar_complex phase;
+      CASSIGN_SCALAR(phase, cos(phase_phi), sin(phase_phi));
+
+      cvector3 F;
+      CASSIGN_MULT_RE(F.x.re, curfield[3*xyz_index+0], phase);
+      CASSIGN_MULT_IM(F.x.im, curfield[3*xyz_index+0], phase);
+      CASSIGN_MULT_RE(F.y.re, curfield[3*xyz_index+1], phase);
+      CASSIGN_MULT_IM(F.y.im, curfield[3*xyz_index+1], phase);
+      CASSIGN_MULT_RE(F.z.re, curfield[3*xyz_index+2], phase);
+      CASSIGN_MULT_IM(F.z.im, curfield[3*xyz_index+2], phase);
+
+      cnumber integrand = field_func(F, epsilon, p, py_func);
+
+      integral.re += integrand.re;
+      integral.im += integrand.im;
+    }
+  }}}
+
+  integral.re *= vol / H.N;
+  integral.im *= vol / H.N;
+  {
+    cnumber integral_sum;
+    mpi_allreduce(&integral, &integral_sum, 2, number, MPI_DOUBLE, MPI_SUM, mpb_comm);
+    return integral_sum;
+  }
+}
+
+number mode_solver::compute_energy_integral(field_integral_func field_func,
+                                            field_integral_energy_func energy_func,
+                                            void *py_func) {
+  if (!curfield || !strchr("DHBR", curfield_type)) {
+    meep::master_fprintf(stderr, "The D or H energy density must be loaded first.\n");
+    return 0.0;
+  }
+
+  return cnumber_re(compute_field_integral(field_func, energy_func, py_func));
+}
+
 // Used in MPBData python class
 
 /* A macro to set x = fractional part of x input, xi = integer part,
@@ -2453,7 +2555,7 @@ void add_cmplx_times_phase(mpb_real *sum_re, mpb_real *sum_im, mpb_real d_re, mp
 void map_data(mpb_real *d_in_re, int size_in_re, mpb_real *d_in_im, int size_in_im,
               int n_in[3], mpb_real *d_out_re, int size_out_re, mpb_real *d_out_im,
               int size_out_im, int n_out[3], matrix3x3 coord_map, mpb_real *kvector,
-              bool pick_nearest, bool verbose) {
+              bool pick_nearest, bool verbose, bool multiply_bloch_phase) {
   (void)size_in_re;
   (void)size_in_im;
   (void)size_out_re;
@@ -2509,6 +2611,13 @@ void map_data(mpb_real *d_in_re, int size_in_re, mpb_real *d_in_im, int size_in_
          MODF_POSITIVE(x, xi);
          MODF_POSITIVE(y, yi);
          MODF_POSITIVE(z, zi);
+
+         if (multiply_bloch_phase) {
+           xi += x;
+           yi += y;
+           zi += z;
+         }
+
          i1 = x * n_in[0]; j1 = y * n_in[1]; k1 = z * n_in[2];
          dx = x * n_in[0] - i1;
          dy = y * n_in[1] - j1;

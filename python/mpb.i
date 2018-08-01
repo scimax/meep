@@ -105,22 +105,13 @@ static int pylattice_to_lattice(PyObject *py_lat, lattice *l) {
     return 1;
 }
 
-static PyObject* v3_to_pyv3(vector3 *v) {
-    PyObject *geom_mod = PyImport_ImportModule("meep.geom");
-    PyObject *v3_class = PyObject_GetAttrString(geom_mod, "Vector3");
-    PyObject *args = Py_BuildValue("(ddd)", v->x, v->y, v->z);
-    PyObject *py_v = PyObject_Call(v3_class, args, NULL);
-
-    Py_DECREF(geom_mod);
-    Py_DECREF(args);
-    Py_DECREF(v3_class);
-
-    return py_v;
+static PyObject* cnumber_to_pycomplex(cnumber *c) {
+    PyObject *result = PyComplex_FromDoubles(c->re, c->im);
+    return result;
 }
 
 static PyObject* cv3_to_pyv3(cvector3 *cv) {
-    PyObject *geom_mod = PyImport_ImportModule("meep.geom");
-    PyObject *v3_class = PyObject_GetAttrString(geom_mod, "Vector3");
+    PyObject *v3_class = py_vector3_object();
 
     vector3 r = cvector3_re(*cv);
     vector3 i = cvector3_im(*cv);
@@ -136,9 +127,7 @@ static PyObject* cv3_to_pyv3(cvector3 *cv) {
     PyObject *args = Py_BuildValue("(DDD)", &x, &y, &z);
     PyObject *py_v = PyObject_Call(v3_class, args, NULL);
 
-    Py_DECREF(geom_mod);
     Py_DECREF(args);
-    Py_DECREF(v3_class);
 
     return py_v;
 }
@@ -148,7 +137,7 @@ static PyObject* cmatrix3x3_to_pymatrix(cmatrix3x3 *m) {
     PyObject *c2 = cv3_to_pyv3(&m->c1);
     PyObject *c3 = cv3_to_pyv3(&m->c2);
 
-    PyObject *geom_mod = PyImport_ImportModule("meep.geom");
+    PyObject *geom_mod = get_geom_mod();
     PyObject *matrix_class = PyObject_GetAttrString(geom_mod, "Matrix");
 
     PyObject *args = Py_BuildValue("(OOO)", c1, c2, c3);
@@ -157,12 +146,49 @@ static PyObject* cmatrix3x3_to_pymatrix(cmatrix3x3 *m) {
     Py_DECREF(c1);
     Py_DECREF(c2);
     Py_DECREF(c3);
-    Py_DECREF(geom_mod);
     Py_DECREF(matrix_class);
     Py_DECREF(args);
 
     return res;
 }
+
+static mpb_real field_integral_energy_callback(mpb_real energy, mpb_real epsilon, vector3 p, void *data) {
+    PyObject *py_func = (PyObject*)data;
+    PyObject *py_energy = PyFloat_FromDouble(energy);
+    PyObject *py_epsilon = PyFloat_FromDouble(epsilon);
+    PyObject *py_p = v3_to_pyv3(&p);
+
+    PyObject *result = PyObject_CallFunctionObjArgs(py_func, py_energy, py_epsilon, py_p, NULL);
+    mpb_real res = PyFloat_AsDouble(result);
+
+    Py_DECREF(py_energy);
+    Py_DECREF(py_epsilon);
+    Py_DECREF(py_p);
+    Py_DECREF(result);
+
+    return res;
+}
+
+
+ static cnumber field_integral_callback(cvector3 F, mpb_real epsilon, vector3 p, void *data) {
+     PyObject *py_func = (PyObject*)data;
+     PyObject *py_F = cv3_to_pyv3(&F);
+     PyObject *py_epsilon = PyFloat_FromDouble(epsilon);
+     PyObject *py_p = v3_to_pyv3(&p);
+
+     PyObject *result = PyObject_CallFunctionObjArgs(py_func, py_F, py_epsilon, py_p, NULL);
+
+     cnumber res;
+     res.re = PyComplex_RealAsDouble(result);
+     res.im = PyComplex_ImagAsDouble(result);
+
+     Py_DECREF(py_F);
+     Py_DECREF(py_epsilon);
+     Py_DECREF(py_p);
+     Py_DECREF(result);
+
+     return res;
+ }
 %}
 
 %include "std_string.i"
@@ -247,7 +273,7 @@ static PyObject* cmatrix3x3_to_pymatrix(cmatrix3x3 *m) {
     $result = PyList_New(n);
 
     for (Py_ssize_t i = 0; i < n; ++i) {
-        PyObject *freq = PyFloat_FromDouble($1[i]);
+        PyObject *freq = PyFloat_FromDouble($1.operator[](i));
         PyList_SetItem($result, i, freq);
     }
 }
@@ -258,8 +284,16 @@ static PyObject* cmatrix3x3_to_pymatrix(cmatrix3x3 *m) {
     $result = PyList_New(n);
 
     for (Py_ssize_t i = 0; i < n; ++i) {
-        PyObject *dim = PyInteger_FromLong($1[i]);
+        PyObject *dim = PyInteger_FromLong($1.operator[](i));
         PyList_SetItem($result, i, dim);
+    }
+}
+
+%typemap(out) cnumber {
+    $result = cnumber_to_pycomplex(&$1);
+
+    if (!$result) {
+        SWIG_fail;
     }
 }
 
@@ -287,10 +321,34 @@ static PyObject* cmatrix3x3_to_pymatrix(cmatrix3x3 *m) {
     }
 }
 
+%typemap(in) (py_mpb::field_integral_func field_func,
+              py_mpb::field_integral_energy_func energy_func,
+              void *py_func) {
+    $1 = field_integral_callback;
+    $2 = field_integral_energy_callback;
+    $3 = (void*)$input;
+}
+
+%typecheck(SWIG_TYPECHECK_POINTER, fragment="NumPy_Fragments") std::complex<double>* cdata {
+    $1 = is_array($input) || $input == Py_None;
+}
+
+%typemap(in) std::complex<double>* cdata {
+    if ($input != Py_None) {
+        $1 = (std::complex<double> *)array_data($input);
+    }
+    else {
+        $1 = NULL;
+    }
+}
+
+%apply double { number };
+
 %include "pympb.hpp"
 
 %pythoncode %{
     from .solver import (
+        MPBArray,
         ModeSolver,
         output_hfield,
         output_hfield_x,

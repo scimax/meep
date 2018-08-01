@@ -72,22 +72,25 @@ static void meep_mpb_eps(symmetric_matrix *eps,
 typedef complex<double> (*amplitude_function)(const vec &);
 
 // default implementation of amplitude_function
-static complex<double> default_amp_func(const vec &pt) 
+static complex<double> default_amp_func(const vec &pt)
  {(void) pt; return 1.0;}
 
 /*******************************************************************/
 /* structure storing all data needed to compute position-dependent */
 /* amplitude for eigenmode source (the fields of this structure    */
 /* were formerly global variables)                                 */
+/* Note: 'Gk' is the k-point in real space, i.e. G*k where         */
+/* G = matrix of reciprocal-lattice basis vectors                  */
+/* k = k vector in reciprocal-lattice basis                        */
 /*******************************************************************/
 typedef struct eigenmode_data
- { 
+ {
    maxwell_data *mdata;
    scalar_complex *fft_data_H, *fft_data_E;
    evectmatrix H;
    int n[3];
    double s[3];
-   double k[3];
+   double Gk[3];
    vec center;
    amplitude_function amp_func;
    int band_num;
@@ -105,7 +108,7 @@ complex<double> eigenmode_amplitude(void *vedata, const vec &p,
   eigenmode_data *edata = (eigenmode_data *)vedata;
   if ( !edata || !(edata->mdata) )
    abort("%s:%i: internal error",__FILE__,__LINE__);
-   
+
   int *n                      = edata->n;
   double *s                   = edata->s;
   vec center                  = edata->center;
@@ -114,14 +117,14 @@ complex<double> eigenmode_amplitude(void *vedata, const vec &p,
   complex<mpb_real> *cdata = (complex<mpb_real> *)( (c>=Hx) ? edata->fft_data_H : edata->fft_data_E );
   const complex<mpb_real> *data;
   switch(c)
-   { 
+   {
      case Ex: cdata = (complex<mpb_real> *)edata->fft_data_E; data = cdata + 0; break;
      case Ey: cdata = (complex<mpb_real> *)edata->fft_data_E; data = cdata + 1; break;
      case Ez: cdata = (complex<mpb_real> *)edata->fft_data_E; data = cdata + 2; break;
      case Hx: cdata = (complex<mpb_real> *)edata->fft_data_H; data = cdata + 0; break;
      case Hy: cdata = (complex<mpb_real> *)edata->fft_data_H; data = cdata + 1; break;
      case Hz: cdata = (complex<mpb_real> *)edata->fft_data_H; data = cdata + 2; break;
-     default: 
+     default:
       abort("invalid component in eigenmode_amplitude");
    };
 
@@ -139,9 +142,9 @@ complex<double> eigenmode_amplitude(void *vedata, const vec &p,
   double dx, dy, dz;
 
   /* get the point corresponding to r in the epsilon array grid: */
-  x = int(rx * nx);
-  y = int(ry * ny);
-  z = int(rz * nz);
+  x = pmod( int(rx * nx), nx );
+  y = pmod( int(ry * ny), ny );
+  z = pmod( int(rz * nz), nz );
 
   /* get the difference between (x,y,z) and the actual point */
   dx = rx * nx - x;
@@ -149,9 +152,9 @@ complex<double> eigenmode_amplitude(void *vedata, const vec &p,
   dz = rz * nz - z;
 
   /* get the other closest point in the grid, with periodic boundaries: */
-  x2 = (nx + (dx >= 0.0 ? x + 1 : x - 1)) % nx;
-  y2 = (ny + (dy >= 0.0 ? y + 1 : y - 1)) % ny;
-  z2 = (nz + (dz >= 0.0 ? z + 1 : z - 1)) % nz;
+  x2 = pmod( (dx >= 0.0 ? x + 1 : x - 1), nx );
+  y2 = pmod( (dy >= 0.0 ? y + 1 : y - 1), ny );
+  z2 = pmod( (dz >= 0.0 ? z + 1 : z - 1), nz );
   x = x % nx; y = y % ny; z = z % nz;
 
   /* take abs(d{xyz}) to get weights for {xyz} and {xyz}2: */
@@ -203,12 +206,12 @@ static complex<double> meep_mpb_A(const vec &p)
 /* call destroy_eigenmode_data() to deallocate when finished.   */
 /****************************************************************/
 void *fields::get_eigenmode(double omega_src,
-	     		    direction d, const volume where,
-			    const volume eig_vol,
-	    	            int band_num,
-		            const vec &kpoint, bool match_frequency,
+                            direction d, const volume where,
+                            const volume eig_vol,
+                            int band_num,
+                            const vec &_kpoint, bool match_frequency,
                             int parity,
-                            double resolution, 
+                            double resolution,
                             double eigensolver_tol,
                             bool verbose)
 {
@@ -216,15 +219,23 @@ void *fields::get_eigenmode(double omega_src,
   /*- part 1: preliminary setup for calling MPB  -----------------*/
   /*--------------------------------------------------------------*/
 
+  // if the mode region extends over the full computational grid and we are bloch-periodic
+  // in any direction, set the corresponding component of the eigenmode initial-guess
+  // k-vector to be the (real part of the) bloch vector in that direction.
+  vec kpoint(_kpoint);
+  LOOP_OVER_DIRECTIONS(v.dim, dd)
+   if (float(eig_vol.in_direction(dd) == float(v.in_direction(dd))))
+      if (boundaries[High][dd]==Periodic && boundaries[Low][dd]==Periodic)
+        kpoint.set_direction(dd, real(k[dd]));
+
   //bool verbose=true;
   if (resolution <= 0.0) resolution = 2 * gv.a; // default to twice resolution
   int n[3], local_N, N_start, alloc_N, mesh_size[3] = {1,1,1};
-  mpb_real k[3] = {0,0,0}, kcart[3] = {0,0,0};
+  mpb_real k[3] = {0,0,0};
   double s[3] = {0,0,0}, o[3] = {0,0,0};
   mpb_real R[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
   mpb_real G[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
   mpb_real kdir[3] = {0,0,0};
-  double kscale = 1.0;
   double match_tol = eigensolver_tol * 10;
 
   if (d == NO_DIRECTION || coordinate_mismatch(gv.dim, d))
@@ -271,45 +282,39 @@ void *fields::get_eigenmode(double omega_src,
   if (!quiet && verbose)
    master_printf("KPOINT: %g, %g, %g\n", k[0], k[1], k[2]);
 
-  // if match_frequency is true, all we need is a direction for k
-  // and a crude guess for its value; we must supply this if k==0.
-  if (match_frequency && k[0] == 0 && k[1] == 0 && k[2] == 0) {
-    k[d-X] = omega_src * sqrt(get_eps(eig_vol.center()));
-    if(!quiet && verbose)
-     master_printf("NEW KPOINT: %g, %g, %g\n", k[0], k[1], k[2]);
-    if (s[d-X] > 0) {
-      k[d-X] *= s[d-X]; // put k in G basis (inverted when we compute kcart)
-      if (fabs(k[d-X]) > 0.4)  // ensure k is well inside the Brillouin zone
-	k[d-X] = k[d-X] > 0 ? 0.4 : -0.4;
-    if(!quiet && verbose)
-      master_printf("NEWER KPOINT: %g, %g, %g\n", k[0], k[1], k[2]);
-    }
-  }
-
   for (int i = 0; i < 3; ++i) {
     n[i] = int(resolution * s[i] + 0.5); if (n[i] == 0) n[i] = 1;
     R[i][i] = s[i] = s[i] == 0 ? 1 : s[i];
     G[i][i] = 1 / R[i][i]; // recip. latt. vectors / 2 pi
+    k[i] *= R[i][i]; // convert k to reciprocal basis
   }
-
-  for (int i = 0; i < 3; ++i)
-    for (int j = 0; j < 3; ++j)
-      kcart[i] += G[j][i] * k[j];
-  double klen0 = sqrt(k[0]*k[0]+k[1]*k[1]+k[2]*k[2]);
-  double klen = sqrt(kcart[0]*kcart[0]+kcart[1]*kcart[1]+kcart[2]*kcart[2]);
-  if (klen == 0.0) {
-    if (match_frequency) abort("need nonzero kpoint guess to match frequency");
-    klen = 1;
-  }
-  kdir[0] = kcart[0] / klen;
-  kdir[1] = kcart[1] / klen;
-  kdir[2] = kcart[2] / klen;
 
   maxwell_data *mdata = create_maxwell_data(n[0], n[1], n[2],
 					    &local_N, &N_start, &alloc_N,
 					    band_num, band_num);
   if (local_N != n[0] * n[1] * n[2])
     abort("MPI version of MPB library not supported");
+
+  meep_mpb_eps_data eps_data;
+  eps_data.s = s; eps_data.o = o; eps_data.dim = gv.dim; eps_data.f = this;
+  set_maxwell_dielectric(mdata, mesh_size, R, G, meep_mpb_eps,NULL, &eps_data);
+  if (check_maxwell_dielectric(mdata, 0))
+    abort("invalid dielectric function for MPB");
+
+  double kmatch = G[d-X][d-X] * k[d-X]; // k[d] in cartesian
+  kdir[d-X] = 1; // kdir = unit vector in d direction
+
+  // if match_frequency is true, we need at least a crude guess for kmatch;
+  // which we automatically pick if kmatch == 0.
+  if (match_frequency && kmatch == 0) {
+    vec cen = eig_vol.center();
+    kmatch = omega_src * sqrt(get_eps(cen)*get_mu(cen));
+    k[d-X] = kmatch * R[d-X][d-X]; // convert to reciprocal basis
+    if (eig_vol.in_direction(d) > 0 && fabs(k[d-X]) > 0.4)  // ensure k is well inside the Brillouin zone
+      k[d-X] = k[d-X] > 0 ? 0.4 : -0.4;
+    if(!quiet && verbose)
+      master_printf("NEW KPOINT: %g, %g, %g\n", k[0], k[1], k[2]);
+  }
 
   set_maxwell_data_parity(mdata, parity);
   update_maxwell_data_k(mdata, k, G[0], G[1], G[2]);
@@ -320,12 +325,6 @@ void *fields::get_eigenmode(double omega_src,
     if (band_num == 0)
       abort("zero-frequency bands at k=0 are ill-defined");
   }
-
-  meep_mpb_eps_data eps_data;
-  eps_data.s = s; eps_data.o = o; eps_data.dim = gv.dim; eps_data.f = this;
-  set_maxwell_dielectric(mdata, mesh_size, R, G, meep_mpb_eps,NULL, &eps_data);
-  if (check_maxwell_dielectric(mdata, 0))
-    abort("invalid dielectric function for MPB");
 
   evectmatrix H = create_evectmatrix(n[0] * n[1] * n[2], 2, band_num,
 				     local_N, N_start, alloc_N);
@@ -349,9 +348,11 @@ void *fields::get_eigenmode(double omega_src,
 				       maxwell_zero_k_constraint,
 				       (void *) mdata);
 
-  mpb_real knew[3]; for (int i = 0; i < 3; ++i) knew[i] = k[i];
-
   mpb_real vgrp; // Re( W[0]* (dTheta/dk) W[0] ) = group velocity
+
+  // track #times change in kmatch increases to detect non-convergence
+  double dkmatch_prev = kmatch;
+  int count_dkmatch_increase = 0;
 
   /*--------------------------------------------------------------*/
   /*- part 2: newton iteration loop with call to MPB on each step */
@@ -371,7 +372,7 @@ void *fields::get_eigenmode(double omega_src,
 		(am_master() && verbose && !quiet ? EIGS_VERBOSE : 0));
     if (!quiet)
       master_printf("MPB solved for omega_%d(%g,%g,%g) = %g after %d iters\n",
-		    band_num, knew[0],knew[1],knew[2],
+		    band_num, G[0][0]*k[0],G[1][1]*k[1],G[2][2]*k[2],
 		    sqrt(eigvals[band_num-1]), num_iters);
 
     if (match_frequency) {
@@ -379,11 +380,11 @@ void *fields::get_eigenmode(double omega_src,
       evectmatrix_resize(&W[0], 1, 0);
       evectmatrix_resize(&W[1], 1, 0);
       for (int i = 0; i < H.n; ++i)
-	W[0].data[i] = H.data[H.p-1 + i * H.p];
+        W[0].data[i] = H.data[H.p-1 + i * H.p];
 
-      // compute the group velocity in the k direction
+      // compute the group velocity in the kdir direction
       maxwell_ucross_op(W[0], W[1], mdata, kdir); // W[1] = (dTheta/dk) W[0]
-      mpb_real vscratch; 
+      mpb_real vscratch;
       evectmatrix_XtY_diag_real(W[0], W[1], &vgrp, &vscratch);
       vgrp /= sqrt(eigvals[band_num - 1]);
 
@@ -392,20 +393,22 @@ void *fields::get_eigenmode(double omega_src,
       evectmatrix_resize(&W[1], band_num, 0);
 
       // update k via Newton step
-      kscale = kscale - (sqrt(eigvals[band_num - 1]) - omega_src) / (vgrp*klen0);
+      double dkmatch = (sqrt(eigvals[band_num - 1]) - omega_src) / vgrp;
+      kmatch = kmatch - dkmatch;
       if (!quiet && verbose)
-	master_printf("Newton step: group velocity v=%g, kscale=%g\n", vgrp, kscale);
-      if (kscale < 0 || kscale > 100)
-	abort("Newton solver not converging -- need a better starting kpoint");
-      for (int i = 0; i < 3; ++i) knew[i] = k[i] * kscale;
-      update_maxwell_data_k(mdata, knew, G[0], G[1], G[2]);
+        master_printf("Newton step: group velocity v=%g, kmatch=%g\n", vgrp, kmatch);
+      count_dkmatch_increase += fabs(dkmatch) > fabs(dkmatch_prev);
+      if (count_dkmatch_increase > 4)
+        return NULL;
+      k[d-X] = kmatch * R[d-X][d-X];
+      update_maxwell_data_k(mdata, k, G[0], G[1], G[2]);
     }
   } while (match_frequency
 	   && fabs(sqrt(eigvals[band_num - 1]) - omega_src) >
 	   omega_src * match_tol);
 
   if (!match_frequency)
-   omega_src = sqrt(eigvals[band_num - 1]);
+    omega_src = sqrt(eigvals[band_num - 1]);
 
   // cleanup temporary storage
   delete[] eigvals;
@@ -459,7 +462,7 @@ void *fields::get_eigenmode(double omega_src,
   // d_from_H actually computes -omega*D (see mpb/src/maxwell/maxwell_op.c)
   double scale = -1.0 / omega_src;
   cdouble *efield=(cdouble *)fft_data_E;
-  for (int n = 0; n < NFFT; ++n) 
+  for (int n = 0; n < NFFT; ++n)
    efield[n] *= scale;
 
   maxwell_compute_e_from_d(mdata, fft_data_E, 1);
@@ -478,10 +481,10 @@ void *fields::get_eigenmode(double omega_src,
   edata->s[0]           = s[0];
   edata->s[1]           = s[1];
   edata->s[2]           = s[2];
-  edata->k[0]           = knew[0];
-  edata->k[1]           = knew[1];
-  edata->k[2]           = knew[2];
-  edata->center         = eig_vol.center() - where.center();
+  edata->Gk[0]          = G[0][0]*k[0] + G[1][0]*k[1] + G[2][0]*k[2];
+  edata->Gk[1]          = G[0][1]*k[0] + G[1][1]*k[1] + G[2][1]*k[2];
+  edata->Gk[2]          = G[0][2]*k[0] + G[1][2]*k[1] + G[2][2]*k[2];
+  edata->center         = eig_vol.center();
   edata->amp_func       = default_amp_func;
   edata->band_num       = band_num;
   edata->omega          = omega_src;
@@ -490,7 +493,7 @@ void *fields::get_eigenmode(double omega_src,
 }
 
 void destroy_eigenmode_data(void *vedata)
-{ 
+{
   eigenmode_data *edata = (eigenmode_data *)vedata;
   destroy_evectmatrix( edata->H  );
   destroy_maxwell_data( edata->mdata );
@@ -505,7 +508,7 @@ double get_group_velocity(void *vedata)
 
 vec get_k(void *vedata)
 { eigenmode_data *edata = (eigenmode_data *)vedata;
-  return vec(edata->k[0], edata->k[1], edata->k[2]);
+  return vec(edata->Gk[0], edata->Gk[1], edata->Gk[2]);
 }
 
 /***************************************************************/
@@ -541,7 +544,6 @@ void fields::add_eigenmode_source(component c0, const src_time &src,
 				  double resolution, double eigensolver_tol,
 				  complex<double> amp,
 				  complex<double> A(const vec &)) {
-
   /*--------------------------------------------------------------*/
   /* step 1: call MPB to compute the eigenmode                    */
   /*--------------------------------------------------------------*/
@@ -550,11 +552,19 @@ void fields::add_eigenmode_source(component c0, const src_time &src,
    =(eigenmode_data *)get_eigenmode(omega_src, d, where,
                                     eig_vol, band_num,
                                     kpoint, match_frequency,
-                                    parity, resolution, 
+                                    parity, resolution,
                                     eigensolver_tol);
 
+  /* add_volume_source amp_fun coordinates are relative to where.center();
+     this is not the default in get_eigenmode because where-relative coordinates
+     are not used elsewhere, e.g. in getting mode coefficients in dft.cpp. */
+  global_eigenmode_data->center -= where.center();
+
+  if (!global_eigenmode_data)
+    abort("eigenmode solver failed to find the requested mode; you may need to supply a better guess for k");
+
   global_eigenmode_data->amp_func = A ? A : default_amp_func;
-  
+
   src_time *src_mpb = src.clone();
   if (!match_frequency)
     src_mpb->set_frequency(omega_src);
@@ -600,20 +610,32 @@ void fields::add_eigenmode_source(component c0, const src_time &src,
 /* array of size num_bands*num_freqs. then on return the group */
 /* velocity for the mode with frequency #nf and band index     */
 /* bands[nb] is stored in vgrp[nb*num_freqs + nf].             */
+/*                                                             */
+/* similarly, if kpoints is non-null it should point to a      */
+/* caller-allocated array of size num_bands*num_freqs, which on*/
+/* return will be populated by the k-vectors for the modes.    */
 /***************************************************************/
-void fields::get_eigenmode_coefficients(dft_flux flux, direction d,
-                                        const volume &where,
-                                        int *bands, int num_bands,
+void fields::get_eigenmode_coefficients(dft_flux flux,
+                                        const volume &eig_vol,
+                                        int *bands, int num_bands, int parity,
+                                        double eig_resolution, double eigensolver_tol,
                                         std::complex<double> *coeffs,
-                                        double *vgrp)
-{ 
+                                        double *vgrp, kpoint_func user_kpoint_func,
+                                        void *user_kpoint_data, vec *kpoints)
+{
   double freq_min      = flux.freq_min;
   double dfreq         = flux.dfreq;
   int num_freqs        = flux.Nfreq;
+  direction d          = flux.normal_direction;
   bool match_frequency = true;
-  int parity           = 0; // NO_PARITY
-  double resolution    = a;
-  double eig_tol       = 1.0e-4;
+
+  if (d==NO_DIRECTION)
+   abort("cannot determine normal direction in get_eigenmode_coefficients");
+
+  if (flux.use_symmetry && S.multiplicity() > 1 && parity == 0)
+   abort("flux regions for eigenmode projection with symmetry should be created by add_mode_monitor()");
+
+  vec kpoint(0.0,0.0,0.0); // default guess
 
   // loop over all bands and all frequencies
   for(int nb=0; nb<num_bands; nb++)
@@ -624,43 +646,51 @@ void fields::get_eigenmode_coefficients(dft_flux flux, direction d,
       /*--------------------------------------------------------------*/
       int band_num = bands[nb];
       double freq  = freq_min + nf*dfreq;
-      vec kpoint(0.0,0.0,0.0);
-      //if (k_func) kpoint = k_func(k_func_data, freq, band_num); 
-      void *mode_data 
-       = get_eigenmode(freq, d, where, where, band_num, kpoint, 
-                       match_frequency, parity, resolution, eig_tol);
+      if (user_kpoint_func) kpoint = user_kpoint_func(freq, band_num, user_kpoint_data);
+      void *mode_data
+       = get_eigenmode(freq, d, flux.where, eig_vol, band_num, kpoint,
+                       match_frequency, parity, eig_resolution, eigensolver_tol);
+      if (!mode_data) { // mode not found, assume evanescent
+        coeffs[2*nb*num_freqs + 2*nf] = coeffs[2*nb*num_freqs + 2*nf + 1] = 0;
+        continue;
+      }
 
-      if (vgrp) vgrp[nb*num_freqs + nf]=get_group_velocity(mode_data);
+      double vg=get_group_velocity(mode_data);
+      if (vgrp) vgrp[nb*num_freqs + nf]=vg;
+      if (kpoints) kpoints[nb*num_freqs + nf]=get_k(mode_data);
 
       /*--------------------------------------------------------------*/
       /*--------------------------------------------------------------*/
       /*--------------------------------------------------------------*/
       cdouble mode_flux[2], mode_mode[2];
-      get_mode_flux_overlap(mode_data, flux, nf, d, mode_flux);
-      get_mode_mode_overlap(mode_data, mode_data, flux, d, mode_mode);
-      cdouble normfac = 0.5*(mode_mode[0] + mode_mode[1]);
+      get_mode_flux_overlap(mode_data, flux, nf, mode_flux);
+      get_mode_mode_overlap(mode_data, mode_data, flux, mode_mode);
+      cdouble cplus   = 0.5*(mode_flux[0] + mode_flux[1]);
+      cdouble cminus  = 0.5*(mode_flux[0] - mode_flux[1]);
+      cdouble normfac = 0.5*(mode_mode[0] + mode_mode[1]); // = vgrp * flux_volume(flux)
       if (normfac==0.0) normfac=1.0;
-      coeffs[ 2*nb*num_freqs + 2*nf + 0 ] 
-       = (mode_flux[0] + mode_flux[1]) / normfac;
-      coeffs[ 2*nb*num_freqs + 2*nf + 1 ]
-       = (mode_flux[0] - mode_flux[1]) / normfac;
-    };
+      double cscale = sqrt((flux.use_symmetry ? S.multiplicity() : 1.0) / abs(normfac));
+      coeffs[ 2*nb*num_freqs + 2*nf + (vg>0.0 ? 0 : 1) ] = cplus * cscale;
+      coeffs[ 2*nb*num_freqs + 2*nf + (vg>0.0 ? 1 : 0) ] = cminus * cscale;
+      destroy_eigenmode_data((void*) mode_data);
+    }
 }
+
 /**************************************************************/
 /* dummy versions of class methods for compiling without MPB  */
 /**************************************************************/
 #else // #ifdef HAVE_MPB
 void *fields::get_eigenmode(double omega_src,
-	     		    direction d, const volume where,
-			    const volume eig_vol,
-	    	            int band_num,
-		            const vec &kpoint, bool match_frequency,
+                            direction d, const volume where,
+                            const volume eig_vol,
+                            int band_num,
+                            const vec &kpoint, bool match_frequency,
                             int parity,
                             double resolution,
                             double eigensolver_tol, bool verbose) {
 
   (void) omega_src; (void) d; (void) where; (void) eig_vol;
-  (void) band_num;  (void) kpoint; (void) match_frequency; 
+  (void) band_num;  (void) kpoint; (void) match_frequency;
   (void) parity; (void) resolution; (void) eigensolver_tol;
   (void) verbose;
   abort("Meep must be configured/compiled with MPB for get_eigenmode");
@@ -675,21 +705,24 @@ void fields::add_eigenmode_source(component c0, const src_time &src,
 				  double resolution, double eigensolver_tol,
 				  complex<double> amp,
 				  complex<double> A(const vec &)) {
-  (void) c0; (void) src; (void) d; (void) where; (void) eig_vol; 
-  (void) band_num;  (void) kpoint; (void) match_frequency; 
+  (void) c0; (void) src; (void) d; (void) where; (void) eig_vol;
+  (void) band_num;  (void) kpoint; (void) match_frequency;
   (void) parity; (void) resolution; (void) eigensolver_tol;
   (void) amp; (void) A;
   abort("Meep must be configured/compiled with MPB for add_eigenmode_source");
 }
 
-void fields::get_eigenmode_coefficients(dft_flux flux, direction d,
-                                        const volume &where,
-                                        int *bands, int num_bands,
+void fields::get_eigenmode_coefficients(dft_flux flux,
+                                        const volume &eig_vol,
+                                        int *bands, int num_bands, int parity,
+                                        double eig_resolution, double eigensolver_tol,
                                         std::complex<double> *coeffs,
-                                        double *vgrp)
-                                        
-{ (void) flux; (void) d; (void) where; (void) bands; (void)num_bands;
-  (void) coeffs; (void) vgrp;
+                                        double *vgrp, kpoint_func user_kpoint_func,
+                                        void *user_kpoint_data, vec *kpoints)
+
+{ (void) flux; (void) eig_vol; (void) bands; (void)num_bands;
+  (void) parity; (void) eig_resolution; (void) eigensolver_tol;
+  (void) coeffs; (void) vgrp; (void) kpoints; (void) user_kpoint_func; (void) user_kpoint_data;
   abort("Meep must be configured/compiled with MPB for get_eigenmode_coefficient");
 }
 

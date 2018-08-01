@@ -1,11 +1,11 @@
 from __future__ import division
 
 import math
-import re
 
 import numpy as np
 import meep as mp
 from . import map_data
+from . import MPBArray
 
 
 class MPBData(object):
@@ -13,7 +13,8 @@ class MPBData(object):
     TWOPI = 6.2831853071795864769252867665590057683943388
 
     def __init__(self,
-                 lattice,
+                 lattice=None,
+                 kpoint=None,
                  rectify=False,
                  x=0,
                  y=0,
@@ -26,6 +27,7 @@ class MPBData(object):
                  verbose=False):
 
         self.lattice = lattice
+        self.kpoint = kpoint
         self.rectify = rectify
 
         if periods:
@@ -56,7 +58,7 @@ class MPBData(object):
                              math.sin(self.TWOPI * self.phase_angle / 360.0))
         self.scaleby *= self.phase
 
-    def handle_dataset(self, in_arr, kvector):
+    def handle_dataset(self, in_arr):
 
         out_dims = [1, 1, 1]
         rank = len(in_arr.shape)
@@ -103,14 +105,14 @@ class MPBData(object):
         flat_in_arr_re = in_arr_re.ravel()
         flat_in_arr_im = in_arr_im.ravel() if isinstance(in_arr_im, np.ndarray) else np.array([])
 
-        if kvector:
-            kvector = [kvector.x, kvector.y, kvector.z]
+        if self.kpoint:
+            kvector = [self.kpoint.x, self.kpoint.y, self.kpoint.z]
         else:
             kvector = []
 
         map_data(flat_in_arr_re, flat_in_arr_im, np.array(in_dims, dtype=np.intc),
                  out_arr_re, out_arr_im, np.array(out_dims, dtype=np.intc), self.coord_map,
-                 kvector, self.pick_nearest, self.verbose)
+                 kvector, self.pick_nearest, self.verbose, False)
 
         if np.iscomplexobj(in_arr):
             # multiply * scaleby for complex data
@@ -121,13 +123,13 @@ class MPBData(object):
 
         return np.reshape(out_arr_re, out_dims[:rank])
 
-    def handle_cvector_dataset(self, in_arr, kvector):
-        in_x_re = np.real(in_arr[:, :, 0]).ravel()
-        in_x_im = np.imag(in_arr[:, :, 0]).ravel()
-        in_y_re = np.real(in_arr[:, :, 1]).ravel()
-        in_y_im = np.imag(in_arr[:, :, 1]).ravel()
-        in_z_re = np.real(in_arr[:, :, 2]).ravel()
-        in_z_im = np.imag(in_arr[:, :, 2]).ravel()
+    def handle_cvector_dataset(self, in_arr, multiply_bloch_phase):
+        in_x_re = np.real(in_arr[:, :, :, 0]).ravel()
+        in_x_im = np.imag(in_arr[:, :, :, 0]).ravel()
+        in_y_re = np.real(in_arr[:, :, :, 1]).ravel()
+        in_y_im = np.imag(in_arr[:, :, :, 1]).ravel()
+        in_z_re = np.real(in_arr[:, :, :, 2]).ravel()
+        in_z_im = np.imag(in_arr[:, :, :, 2]).ravel()
 
         d_in = [[in_x_re, in_x_im], [in_y_re, in_y_im], [in_z_re, in_z_im]]
         in_dims = [in_arr.shape[0], in_arr.shape[1], 1]
@@ -179,8 +181,8 @@ class MPBData(object):
             fmt = "Output data {}x{}x{}."
             print(fmt.format(out_dims[0], out_dims[1], out_dims[2]))
 
-        if kvector:
-            kvector = [kvector.x, kvector.y, kvector.z]
+        if self.kpoint:
+            kvector = [self.kpoint.x, self.kpoint.y, self.kpoint.z]
         else:
             kvector = []
 
@@ -191,7 +193,7 @@ class MPBData(object):
 
             map_data(d_in[dim][0].ravel(), d_in[dim][1].ravel(), np.array(in_dims, dtype=np.intc),
                      out_arr_re, out_arr_im, np.array(out_dims, dtype=np.intc), self.coord_map,
-                     kvector, self.pick_nearest, self.verbose)
+                     kvector, self.pick_nearest, self.verbose, multiply_bloch_phase)
 
             # multiply * scaleby
             complex_out = np.vectorize(complex)(out_arr_re, out_arr_im)
@@ -205,7 +207,7 @@ class MPBData(object):
 
         return np.reshape(result, (out_dims[0], out_dims[1], 3))
 
-    def init_output_lattice(self, kvector):
+    def init_output_lattice(self):
 
         cart_map = mp.Matrix(
             mp.Vector3(1, 0, 0),
@@ -221,8 +223,9 @@ class MPBData(object):
 
         if self.verbose:
             print("Read lattice vectors")
-            if kvector:
-                print("Read Bloch wavevector ({:.6g}, {:.6g}, {:.6g})".format(kvector.x, kvector.y, kvector.z))
+            if self.kpoint:
+                fmt = "Read Bloch wavevector ({:.6g}, {:.6g}, {:.6g})"
+                print(fmt.format(self.kpoint.x, self.kpoint.y, self.kpoint.z))
             fmt = "Input lattice = ({:.6g}, {:.6g}, {:.6g}), ({:.6g}, {:.6g}, {:.6g}), ({:.6g}, {:.6g}, {:.6g})"
             print(fmt.format(Rin.c1.x, Rin.c1.y, Rin.c1.z,
                              Rin.c2.x, Rin.c2.y, Rin.c2.z,
@@ -277,9 +280,24 @@ class MPBData(object):
         self.cart_map = cart_map
 
     def convert(self, arr, kpoint=None):
-        self.init_output_lattice(kpoint)
+        if isinstance(arr, MPBArray):
+            self.lattice = arr.lattice
+            self.kpoint = arr.kpoint
 
-        if len(arr.shape) == 3:
-            return self.handle_cvector_dataset(arr, kpoint)
+        if self.lattice is None:
+            err = ("Couldn't find 'lattice.' You must do one of the following:\n" +
+                   "  1. Pass the ModeSolver lattice to the MPBData constructor\n" +
+                   "     i.e., MPBData(lattice=ms.get_lattice())\n" +
+                   "  2. Create an MPBArray to pass to MPBData.convert()\n" +
+                   "     i.e., mpb_arr = MPBArray(arr, ms.get_lattice(), ... ); mpb_data.convert(mpb_arr))")
+            raise ValueError(err)
+
+        if kpoint:
+            self.kpoint = kpoint
+
+        self.init_output_lattice()
+
+        if len(arr.shape) == 4:
+            return self.handle_cvector_dataset(arr, not arr.bloch_phase)
         else:
-            return self.handle_dataset(arr, kpoint)
+            return self.handle_dataset(arr)

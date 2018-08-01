@@ -1,6 +1,7 @@
 from __future__ import division, print_function
 
 import functools
+import math
 import os
 import numbers
 import re
@@ -23,18 +24,58 @@ U_PROD = 1
 U_SUM = 2
 
 
+class MPBArray(np.ndarray):
+
+    def __new__(cls, input_array, lattice, kpoint=None, bloch_phase=False):
+        # Input array is an already formed ndarray instance
+        # We first cast to be our class type
+        obj = np.asarray(input_array).view(cls)
+        # add the new properties to the created instance
+        obj.lattice = lattice
+        obj.kpoint = kpoint
+        obj.bloch_phase = bloch_phase
+        # Finally, we must return the newly created object:
+        return obj
+
+    def __array_finalize__(self, obj):
+        # ``self`` is a new object resulting from
+        # ndarray.__new__(MPBArray, ...), therefore it only has
+        # attributes that the ndarray.__new__ constructor gave it -
+        # i.e. those of a standard ndarray.
+
+        # We could have got to the ndarray.__new__ call in 3 ways:
+        # From an explicit constructor - e.g. MPBArray(lattice):
+        #    obj is None
+        #    (we're in the middle of the MPBArray.__new__
+        #    constructor, and self.lattice will be set when we return to
+        #    MPBArray.__new__)
+        if obj is None:
+            return
+
+        # From view casting - e.g arr.view(MPBArray):
+        #    obj is arr
+        #    (type(obj) can be MPBArray)
+        # From new-from-template - e.g mpbarr[:3]
+        #    type(obj) is MPBArray
+        #
+        # Note that it is here, rather than in the __new__ method,
+        # that we set the default value for 'lattice', because this
+        # method sees all creation of default objects - with the
+        # MPBArray.__new__ constructor, but also with
+        # arr.view(MPBArray).
+        self.lattice = getattr(obj, 'lattice', None)
+        self.kpoint = getattr(obj, 'kpoint', None)
+        self.bloch_phase = getattr(obj, 'bloch_phase', False)
+
+
 class ModeSolver(object):
 
     def __init__(self,
                  resolution=10,
                  is_negative_epsilon_ok=False,
                  eigensolver_flops=0,
-                 is_eigensolver_davidson=False,
-                 eigensolver_nwork=3,
-                 eigensolver_block_size=-11,
                  eigensolver_flags=68,
-                 is_simple_preconditioner=False,
-                 is_deterministic=False,
+                 use_simple_preconditioner=False,
                  force_mu=False,
                  mu_input_file='',
                  epsilon_input_file='',
@@ -52,17 +93,18 @@ class ModeSolver(object):
                  random_fields=False,
                  filename_prefix='',
                  deterministic=False,
-                 verbose=False):
+                 verbose=False,
+                 optimize_grid_size=True,
+                 eigensolver_nwork=3,
+                 eigensolver_block_size=-11):
 
         self.resolution = resolution
         self.is_negative_epsilon_ok = is_negative_epsilon_ok
         self.eigensolver_flops = eigensolver_flops
-        self.is_eigensolver_davidson = is_eigensolver_davidson
         self.eigensolver_nwork = eigensolver_nwork
         self.eigensolver_block_size = eigensolver_block_size
         self.eigensolver_flags = eigensolver_flags
-        self.is_simple_preconditioner = is_simple_preconditioner
-        self.is_deterministic = is_deterministic
+        self.use_simple_preconditioner = use_simple_preconditioner
         self.force_mu = force_mu
         self.mu_input_file = mu_input_file
         self.epsilon_input_file = epsilon_input_file
@@ -81,6 +123,9 @@ class ModeSolver(object):
         self.filename_prefix = filename_prefix
         self.deterministic = deterministic
         self.verbose = verbose
+        self.optimize_grid_size = optimize_grid_size
+        self.eigensolver_nwork = eigensolver_nwork
+        self.eigensolver_block_size = eigensolver_block_size
         self.parity = ''
         self.iterations = 0
         self.all_freqs = None
@@ -108,6 +153,10 @@ class ModeSolver(object):
             t = type(val)
             raise TypeError("resolution must be a number or a Vector3: Got {}".format(t))
 
+    def allow_negative_epsilon(self):
+        self.is_negative_epsilon_ok = True
+        self.target_freq = 1 / mp.inf
+
     def get_filename_prefix(self):
         if self.filename_prefix:
             return self.filename_prefix + '-'
@@ -122,9 +171,15 @@ class ModeSolver(object):
     def get_freqs(self):
         return self.mode_solver.get_freqs()
 
+    def multiply_bloch_phase(self, arr):
+        dims = arr.shape
+        arr = arr.ravel()
+        self.mode_solver.multiply_bloch_phase(arr)
+        return np.reshape(arr, dims)
+
     def get_poynting(self, which_band):
-        e = self.get_efield(which_band).ravel()
-        h = self.get_hfield(which_band).ravel()
+        e = self.get_efield(which_band, False).ravel()
+        h = self.get_hfield(which_band, False).ravel()
         # Reshape into rows of vector3s
         e = e.reshape((int(e.shape[0] / 3), 3))
         h = h.reshape((int(h.shape[0] / 3), 3))
@@ -140,39 +195,36 @@ class ModeSolver(object):
             res[i] = np.array(ExH(e[i], h[i]))
 
         flat_res = res.ravel()
-        # We only have to set curfield here to do `multiply_bloch_phase` in
-        # _output_vector_field.
         self.mode_solver.set_curfield_cmplx(flat_res)
         self.mode_solver.set_curfield_type('v')
 
-        return flat_res
+        return MPBArray(res, self.get_lattice, self.current_k)
 
     def get_epsilon(self):
         self.mode_solver.get_epsilon()
+        return self.get_curfield_as_array(False)
 
-        dims = self.mode_solver.get_dims()
-        eps = np.empty(np.prod(dims))
-        self.mode_solver.get_curfield(eps)
+    def get_mu(self):
+        self.mode_solver.get_mu()
+        return self.get_curfield_as_array(False)
 
-        return np.reshape(eps, dims)
+    def get_bfield(self, which_band, bloch_phase=True):
+        return self._get_field('b', which_band, bloch_phase)
 
-    def get_bfield(self, which_band, output=False):
-        return self._get_field('b', which_band, output)
+    def get_efield(self, which_band, bloch_phase=True):
+        return self._get_field('e', which_band, bloch_phase)
 
-    def get_efield(self, which_band, output=False):
-        return self._get_field('e', which_band, output)
+    def get_dfield(self, which_band, bloch_phase=True):
+        return self._get_field('d', which_band, bloch_phase)
 
-    def get_dfield(self, which_band, output=False):
-        return self._get_field('d', which_band, output)
-
-    def get_hfield(self, which_band, output=False):
-        return self._get_field('h', which_band, output)
+    def get_hfield(self, which_band, bloch_phase=True):
+        return self._get_field('h', which_band, bloch_phase)
 
     def get_charge_density(self, which_band):
         self.get_efield(which_band)
         self.mode_solver.compute_field_divergence()
 
-    def _get_field(self, f, band, output):
+    def _get_field(self, f, band, bloch_phase):
         if self.mode_solver is None:
             raise ValueError("Must call a run function before attempting to get a field")
 
@@ -186,15 +238,43 @@ class ModeSolver(object):
             self.mode_solver.get_hfield(band)
 
         dims = self.mode_solver.get_dims()
-        dims += [3]
-        res = np.zeros(np.prod(dims), np.complex128)
 
-        if output:
+        while len(dims) < 3:
+            dims += [1]
+
+        dims += [3]
+        arr = np.zeros(np.prod(dims), np.complex128)
+
+        if bloch_phase:
             self.mode_solver.multiply_bloch_phase()
 
-        self.mode_solver.get_curfield_cmplx(res)
+        self.mode_solver.get_curfield_cmplx(arr)
 
-        return np.reshape(res, dims)
+        arr = np.reshape(arr, dims)
+        res = MPBArray(arr, self.get_lattice(), self.current_k, bloch_phase=bloch_phase)
+
+        return res
+
+    def get_curfield_as_array(self, bloch_phase=True):
+        dims = self.mode_solver.get_dims()
+        arr = np.zeros(np.prod(dims))
+        self.mode_solver.get_curfield(arr)
+        arr = np.reshape(arr, dims)
+
+        return MPBArray(arr, self.get_lattice(), self.current_k, bloch_phase=bloch_phase)
+
+    def get_dpwr(self, band):
+        self.get_dfield(band, False)
+        self.compute_field_energy()
+        return self.get_curfield_as_array(False)
+
+    def get_bpwr(self, band):
+        self.get_bfield(band, False)
+        self.compute_field_energy()
+        return self.get_curfield_as_array(False)
+
+    def fix_field_phase(self):
+        self.mode_solver.fix_field_phase()
 
     def get_epsilon_point(self, p):
         return self.mode_solver.get_epsilon_point(p)
@@ -212,33 +292,21 @@ class ModeSolver(object):
         return self.mode_solver.get_bloch_field_point(p)
 
     def get_tot_pwr(self, which_band):
-        self.get_dfield(which_band)
-        self.compute_field_energy()
-
-        dims = self.mode_solver.get_dims()
-        epwr = np.zeros(np.prod(dims))
-        self.mode_solver.get_curfield(epwr)
-        epwr = np.reshape(epwr, dims)
-
-        self.get_bfield(which_band)
-        self.compute_field_energy()
-
-        hpwr = np.zeros(np.prod(dims))
-        self.mode_solver.get_curfield(hpwr)
-        hpwr = np.reshape(hpwr, dims)
+        epwr = self.get_dpwr(which_band)
+        hpwr = self.get_bpwr(which_band)
 
         tot_pwr = epwr + hpwr
 
         self.mode_solver.set_curfield(tot_pwr.ravel())
         self.mode_solver.set_curfield_type('R')
 
-        return tot_pwr
+        return MPBArray(tot_pwr, self.get_lattice(), self.current_k, bloch_phase=False)
 
     def get_eigenvectors(self, first_band, num_bands):
         dims = self.mode_solver.get_eigenvectors_slice_dims(num_bands)
         ev = np.zeros(np.prod(dims), dtype=np.complex128)
         self.mode_solver.get_eigenvectors(first_band - 1, num_bands, ev)
-        return ev.reshape(dims)
+        return MPBArray(ev.reshape(dims), self.get_lattice(), self.current_k)
 
     def set_eigenvectors(self, ev, first_band):
         self.mode_solver.set_eigenvectors(first_band - 1, ev.flatten())
@@ -445,7 +513,8 @@ class ModeSolver(object):
             f['Bloch wavevector'] = np.array(output_k)
             self._write_lattice_vectors(f)
 
-            self.mode_solver.multiply_bloch_phase()
+            if curfield_type != 'v':
+                self.mode_solver.multiply_bloch_phase()
 
             for c_idx, c in enumerate(components):
                 if component >= 0 and c_idx != component:
@@ -509,10 +578,7 @@ class ModeSolver(object):
         h5file['lattice vectors'] = lattice
 
     def _create_h5_dataset(self, h5file, key):
-        dims = self.mode_solver.get_dims()
-        arr = np.zeros(np.prod(dims))
-        self.mode_solver.get_curfield(arr)
-        h5file[key] = np.reshape(arr, dims)
+        h5file[key] = self.get_curfield_as_array(False)
 
     def _create_fname(self, fname, prefix, parity_suffix):
         parity_str = self.mode_solver.get_parity_string()
@@ -535,6 +601,12 @@ class ModeSolver(object):
     def compute_energy_in_dielectric(self, eps_low, eps_high):
         return self.mode_solver.compute_energy_in_dielectric(eps_low, eps_high)
 
+    def compute_energy_integral(self, f):
+        return self.mode_solver.compute_energy_integral(f)
+
+    def compute_field_integral(self, f):
+        return self.mode_solver.compute_field_integral(f)
+
     def compute_group_velocities(self):
         xarg = mp.cartesian_to_reciprocal(mp.Vector3(1), self.geometry_lattice)
         vx = self.mode_solver.compute_group_velocity_component(xarg)
@@ -554,6 +626,12 @@ class ModeSolver(object):
     def compute_one_group_velocity_component(self, direction, which_band):
         return self.mode_solver.compute_1_group_velocity_component(direction,
                                                                    which_band)
+
+    def compute_zparities(self):
+        return self.mode_solver.compute_zparities()
+
+    def compute_yparities(self):
+        return self.mode_solver.compute_yparities()
 
     def randomize_fields(self):
         self.mode_solver.randomize_fields()
@@ -590,23 +668,41 @@ class ModeSolver(object):
         mean_time = self.total_run_time / (mean_iters * num_runs)
         print("mean time per iteration = {} s".format(mean_time))
 
-    def run_parity(self, p, reset_fields, *band_functions):
-        if self.random_fields and self.randomize_fields not in band_functions:
-            band_functions.append(self.randomize_fields)
+    def _get_grid_size(self):
+        grid_size = mp.Vector3(self.resolution[0] * self.geometry_lattice.size.x,
+                               self.resolution[1] * self.geometry_lattice.size.y,
+                               self.resolution[2] * self.geometry_lattice.size.z)
 
-        start = time.time()
+        grid_size.x = max(math.ceil(grid_size.x), 1)
+        grid_size.y = max(math.ceil(grid_size.y), 1)
+        grid_size.z = max(math.ceil(grid_size.z), 1)
 
-        self.all_freqs = np.zeros((len(self.k_points), self.num_bands))
-        self.band_range_data = []
+        return grid_size
 
-        init_time = time.time()
+    def _optimize_grid_size(self):
+        self.grid_size.x = self.next_factor2357(self.grid_size.x)
+        self.grid_size.y = self.next_factor2357(self.grid_size.y)
+        self.grid_size.z = self.next_factor2357(self.grid_size.z)
 
-        print("Initializing eigensolver data")
-        print("Computing {} bands with {} tolerance".format(self.num_bands, self.tolerance))
+    def next_factor2357(self, n):
 
-        if type(self.default_material) is not mp.Medium and callable(self.default_material):
-            # TODO: Support epsilon_function user materials like meep?
-            self.default_material.eps = False
+        def is_factor2357(n):
+
+            def divby(n, p):
+                if n % p == 0:
+                    return divby(n // p, p)
+                return n
+            return divby(divby(divby(divby(n, 2), 3), 5), 7) == 1
+
+        if is_factor2357(n):
+            return n
+        return self.next_factor2357(n + 1)
+
+    def init_params(self, p, reset_fields):
+        self.grid_size = self._get_grid_size()
+
+        if self.optimize_grid_size:
+            self._optimize_grid_size()
 
         self.mode_solver = mode_solver(
             self.num_bands,
@@ -628,7 +724,37 @@ class ModeSolver(object):
             self.epsilon_input_file,
             self.mu_input_file,
             self.force_mu,
+            self.use_simple_preconditioner,
+            self.grid_size,
+            self.eigensolver_nwork,
+            self.eigensolver_block_size,
         )
+
+    def set_parity(self, p):
+        self.mode_solver.set_parity(p)
+
+    def solve_kpoint(self, k):
+        self.mode_solver.solve_kpoint(k)
+
+    def run_parity(self, p, reset_fields, *band_functions):
+        if self.random_fields and self.randomize_fields not in band_functions:
+            band_functions.append(self.randomize_fields)
+
+        start = time.time()
+
+        self.all_freqs = np.zeros((len(self.k_points), self.num_bands))
+        self.band_range_data = []
+
+        init_time = time.time()
+
+        print("Initializing eigensolver data")
+        print("Computing {} bands with {} tolerance".format(self.num_bands, self.tolerance))
+
+        if type(self.default_material) is not mp.Medium and callable(self.default_material):
+            # TODO: Support epsilon_function user materials like meep?
+            self.default_material.eps = False
+
+        self.init_params(p, reset_fields)
 
         if isinstance(reset_fields, basestring):
             self.load_eigenvectors(reset_fields)
@@ -644,11 +770,6 @@ class ModeSolver(object):
         # k_split = list_split(self.k_points, self.k_split_num, self.k_split_index)
         k_split = (0, self.k_points)
         self.mode_solver.set_kpoint_index(k_split[0])
-
-        if k_split[0] == 0:
-            self.output_epsilon()  # output epsilon immediately for 1st k block
-            if self.mode_solver.using_mu():
-                self.output_mu()  # and mu too, if we have it
 
         if self.num_bands > 0:
             for i, k in enumerate(k_split[1]):
@@ -800,7 +921,7 @@ class ModeSolver(object):
 
         self.num_bands = num_bands_save
         self.k_points = kpoints_save
-        ks = reversed(ks)
+        ks = list(reversed(ks))
         print("{}kvals:, {}, {}, {}".format(self.parity, omega, band_min, band_max), end='')
         for k in korig:
             print(", {}".format(k), end='')
@@ -852,93 +973,93 @@ class ModeSolver(object):
 # Predefined output functions (functions of the band index), for passing to `run`
 
 def output_hfield(ms, which_band):
-    ms.get_hfield(which_band)
+    ms.get_hfield(which_band, False)
     ms.output_field()
 
 
 def output_hfield_x(ms, which_band):
-    ms.get_hfield(which_band)
+    ms.get_hfield(which_band, False)
     ms.output_field_x()
 
 
 def output_hfield_y(ms, which_band):
-    ms.get_hfield(which_band)
+    ms.get_hfield(which_band, False)
     ms.output_field_y()
 
 
 def output_hfield_z(ms, which_band):
-    ms.get_hfield(which_band)
+    ms.get_hfield(which_band, False)
     ms.output_field_z()
 
 
 def output_bfield(ms, which_band):
-    ms.get_bfield(which_band)
+    ms.get_bfield(which_band, False)
     ms.output_field()
 
 
 def output_bfield_x(ms, which_band):
-    ms.get_bfield(which_band)
+    ms.get_bfield(which_band, False)
     ms.output_field_x()
 
 
 def output_bfield_y(ms, which_band):
-    ms.get_bfield(which_band)
+    ms.get_bfield(which_band, False)
     ms.output_field_y()
 
 
 def output_bfield_z(ms, which_band):
-    ms.get_bfield(which_band)
+    ms.get_bfield(which_band, False)
     ms.output_field_z()
 
 
 def output_dfield(ms, which_band):
-    ms.get_dfield(which_band)
+    ms.get_dfield(which_band, False)
     ms.output_field()
 
 
 def output_dfield_x(ms, which_band):
-    ms.get_dfield(which_band)
+    ms.get_dfield(which_band, False)
     ms.output_field_x()
 
 
 def output_dfield_y(ms, which_band):
-    ms.get_dfield(which_band)
+    ms.get_dfield(which_band, False)
     ms.output_field_y()
 
 
 def output_dfield_z(ms, which_band):
-    ms.get_dfield(which_band)
+    ms.get_dfield(which_band, False)
     ms.output_field_z()
 
 
 def output_efield(ms, which_band):
-    ms.get_efield(which_band)
+    ms.get_efield(which_band, False)
     ms.output_field()
 
 
 def output_efield_x(ms, which_band):
-    ms.get_efield(which_band)
+    ms.get_efield(which_band, False)
     ms.output_field_x()
 
 
 def output_efield_y(ms, which_band):
-    ms.get_efield(which_band)
+    ms.get_efield(which_band, False)
     ms.output_field_y()
 
 
 def output_efield_z(ms, which_band):
-    ms.get_efield(which_band)
+    ms.get_efield(which_band, False)
     ms.output_field_z()
 
 
 def output_bpwr(ms, which_band):
-    ms.get_bfield(which_band)
+    ms.get_bfield(which_band, False)
     ms.compute_field_energy()
     ms.output_field()
 
 
 def output_dpwr(ms, which_band):
-    ms.get_dfield(which_band)
+    ms.get_dfield(which_band, False)
     ms.compute_field_energy()
     ms.output_field()
 
@@ -958,7 +1079,7 @@ def output_dpwr_in_objects(output_func, min_energy, objects=[]):
     """
 
     def _output(ms, which_band):
-        ms.get_dfield(which_band)
+        ms.get_dfield(which_band, False)
         ms.compute_field_energy()
         energy = ms.compute_energy_in_objects(objects)
         fmt = "dpwr:, {}, {}, {} "
@@ -1010,22 +1131,22 @@ def display_group_velocities(ms):
 # given band based upon the spatial representation of the given field
 
 def fix_hfield_phase(ms, which_band):
-    ms.get_hfield(which_band)
+    ms.get_hfield(which_band, False)
     ms.mode_solver.fix_field_phase()
 
 
 def fix_bfield_phase(ms, which_band):
-    ms.get_bfield(which_band)
+    ms.get_bfield(which_band, False)
     ms.mode_solver.fix_field_phase()
 
 
 def fix_dfield_phase(ms, which_band):
-    ms.get_dfield(which_band)
+    ms.get_dfield(which_band, False)
     ms.mode_solver.fix_field_phase()
 
 
 def fix_efield_phase(ms, which_band):
-    ms.get_efield(which_band)
+    ms.get_efield(which_band, False)
     ms.mode_solver.fix_field_phase()
 
 

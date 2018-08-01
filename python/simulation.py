@@ -1,11 +1,13 @@
 from __future__ import division, print_function
 
+import functools
 import math
 import numbers
 import os
 import re
 import subprocess
 import sys
+import warnings
 from collections import namedtuple
 from collections import Sequence
 
@@ -22,10 +24,32 @@ except NameError:
     basestring = str
 
 
+FluxData = namedtuple('FluxData', ['E', 'H'])
+ForceData = namedtuple('ForceData', ['offdiag1', 'offdiag2', 'diag'])
+NearToFarData = namedtuple('NearToFarData', ['F'])
+
+
 def get_num_args(func):
     if isinstance(func, Harminv):
         return 2
     return func.__code__.co_argcount
+
+
+def vec(*args):
+    try:
+        # Check for vec(x, [y, [z]])
+        return mp._vec(*args)
+    except (TypeError, NotImplementedError):
+        try:
+            # Check for vec(iterable)
+            if len(args) != 1:
+                raise TypeError
+
+            return mp._vec(*args[0])
+        except (TypeError, NotImplementedError):
+            print("Expected an iterable with three or fewer floating point values")
+            print("    or something of the form vec(x, [y, [z]])")
+            raise
 
 
 def py_v3_to_vec(dims, v3, is_cylindrical=False):
@@ -138,6 +162,9 @@ class FluxRegion(object):
         self.weight = complex(weight)
 
 
+ModeRegion = FluxRegion
+
+
 class ForceRegion(object):
 
     def __init__(self, center, direction, size=mp.Vector3(), weight=1.0):
@@ -156,7 +183,174 @@ class Near2FarRegion(object):
         self.weight = complex(weight)
 
 
+class FieldsRegion(object):
+
+    def __init__(self, where=None, center=None, size=None):
+        self.where = where
+        self.center = center
+        self.size = size
+
+
+class DftObj(object):
+
+    def __init__(self, func, args):
+        self.func = func
+        self.args = args
+        self.swigobj = None
+
+    def swigobj_attr(self, attr):
+        if self.swigobj is None:
+            self.swigobj = self.func(*self.args)
+        return getattr(self.swigobj, attr)
+
+    @property
+    def save_hdf5(self):
+        return self.swigobj_attr('save_hdf5')
+
+    @property
+    def load_hdf5(self):
+        return self.swigobj_attr('load_hdf5')
+
+    @property
+    def scale_dfts(self):
+        return self.swigobj_attr('scale_dfts')
+
+    @property
+    def remove(self):
+        return self.swigobj_attr('remove')
+
+    @property
+    def freq_min(self):
+        return self.swigobj_attr('freq_min')
+
+    @property
+    def dfreq(self):
+        return self.swigobj_attr('dfreq')
+
+    @property
+    def Nfreq(self):
+        return self.swigobj_attr('Nfreq')
+
+    @property
+    def where(self):
+        return self.swigobj_attr('where')
+
+
+class DftFlux(DftObj):
+
+    def __init__(self, func, args):
+        super(DftFlux, self).__init__(func, args)
+        self.nfreqs = args[2]
+        self.regions = args[3]
+        self.num_components = 4
+
+    @property
+    def flux(self):
+        return self.swigobj_attr('flux')
+
+    @property
+    def E(self):
+        return self.swigobj_attr('E')
+
+    @property
+    def H(self):
+        return self.swigobj_attr('H')
+
+    @property
+    def cE(self):
+        return self.swigobj_attr('cE')
+
+    @property
+    def cH(self):
+        return self.swigobj_attr('cH')
+
+    @property
+    def normal_direction(self):
+        return self.swigobj_attr('normal_direction')
+
+
+class DftForce(DftObj):
+
+    def __init__(self, func, args):
+        super(DftForce, self).__init__(func, args)
+        self.nfreqs = args[2]
+        self.regions = args[3]
+        self.num_components = 6
+
+    @property
+    def force(self):
+        return self.swigobj_attr('force')
+
+    @property
+    def offdiag1(self):
+        return self.swigobj_attr('offdiag1')
+
+    @property
+    def offdiag2(self):
+        return self.swigobj_attr('offdiag2')
+
+    @property
+    def diag(self):
+        return self.swigobj_attr('diag')
+
+
+class DftNear2Far(DftObj):
+
+    def __init__(self, func, args):
+        super(DftNear2Far, self).__init__(func, args)
+        self.nfreqs = args[2]
+        self.regions = args[3]
+        self.num_components = 4
+
+    @property
+    def farfield(self):
+        return self.swigobj_attr('farfield')
+
+    @property
+    def save_farfields(self):
+        return self.swigobj_attr('save_farfields')
+
+    @property
+    def F(self):
+        return self.swigobj_attr('F')
+
+    @property
+    def eps(self):
+        return self.swigobj_attr('eps')
+
+    @property
+    def mu(self):
+        return self.swigobj_attr('mu')
+
+
+class DftFields(DftObj):
+
+    def __init__(self, func, args):
+        super(DftFields, self).__init__(func, args)
+        self.nfreqs = args[6]
+        self.regions = [FieldsRegion(where=args[1], center=args[2], size=args[3])]
+        self.num_components = len(args[0])
+
+    @property
+    def chunks(self):
+        return self.swigobj_attr('chunks')
+
+
 Mode = namedtuple('Mode', ['freq', 'decay', 'Q', 'amp', 'err'])
+
+
+class EigenmodeData(object):
+
+    def __init__(self, band_num, omega, group_velocity, k, swigobj):
+        self.band_num = band_num
+        self.omega = omega
+        self.group_velocity = group_velocity
+        self.k = k
+        self.swigobj = swigobj
+
+    def amplitude(self, point, component):
+        swig_point = mp.vec(point.x, point.y, point.z)
+        return mp.eigenmode_amplitude(self.swigobj, swig_point, component)
 
 
 class Harminv(object):
@@ -193,9 +387,28 @@ class Harminv(object):
             return _collect2
         return _collect1
 
+    def _check_freqs(self, sim):
+        source_freqs = [(s.src.frequency, 0 if s.src.width == 0 else 1 / s.src.width)
+                        for s in sim.sources
+                        if hasattr(s.src, 'frequency')]
+
+        harminv_max = self.fcen + 0.5 * self.df
+        harminv_min = self.fcen - 0.5 * self.df
+
+        for sf in source_freqs:
+            sf_max = sf[0] + 0.5 * sf[1]
+            sf_min = sf[0] - 0.5 * sf[1]
+            if harminv_max > sf_max:
+                warn_fmt = "Harminv frequency {} is outside maximum Source frequency {}"
+                warnings.warn(warn_fmt.format(harminv_max, sf_max), RuntimeWarning)
+            if harminv_min < sf_min:
+                warn_fmt = "Harminv frequency {} is outside minimum Source frequency {}"
+                warnings.warn(warn_fmt.format(harminv_min, sf_min), RuntimeWarning)
+
     def _analyze_harminv(self, sim, maxbands):
-        harminv_cols = ['frequency', 'imag.', 'freq.', 'Q', '|amp|', 'amplitude', 'error']
+        harminv_cols = ['frequency', 'imag. freq.', 'Q', '|amp|', 'amplitude', 'error']
         display_run_data(sim, 'harminv', harminv_cols)
+        self._check_freqs(sim)
 
         dt = self.data_dt if self.data_dt is not None else sim.fields.dt
 
@@ -249,13 +462,14 @@ class Simulation(object):
                  progress_interval=4,
                  subpixel_tol=1e-4,
                  subpixel_maxeval=100000,
-                 ensure_periodicity=False,
+                 ensure_periodicity=True,
                  num_chunks=0,
-                 courant=0.5,
+                 Courant=0.5,
                  accurate_fields_near_cylorigin=False,
                  filename_prefix='',
                  output_volume=None,
-                 output_single_precision=False):
+                 output_single_precision=False,
+                 load_structure=''):
 
         self.cell_size = cell_size
         self.geometry = geometry
@@ -273,7 +487,7 @@ class Simulation(object):
         self.default_material = default_material
         self.epsilon_input_file = epsilon_input_file
         self.num_chunks = num_chunks
-        self.courant = courant
+        self.Courant = Courant
         self.global_d_conductivity = 0
         self.global_b_conductivity = 0
         self.special_kz = False
@@ -285,7 +499,7 @@ class Simulation(object):
         self.force_complex_fields = force_complex_fields
         self.verbose = verbose
         self.progress_interval = progress_interval
-        self.init_fields_hooks = []
+        self.init_sim_hooks = []
         self.run_index = 0
         self.filename_prefix = filename_prefix
         self.output_append_h5 = None
@@ -297,6 +511,8 @@ class Simulation(object):
         self.is_cylindrical = False
         self.material_function = material_function
         self.epsilon_func = epsilon_func
+        self.load_structure_file = load_structure
+        self.dft_objects = []
 
     # To prevent the user from having to specify `dims` and `is_cylindrical`
     # to Volumes they create, the library will adjust them appropriately based
@@ -304,6 +520,21 @@ class Simulation(object):
     # any user-defined Volume before passing it to meep via its `swigobj`.
     def _fit_volume_to_simulation(self, vol):
         return Volume(vol.center, vol.size, dims=self.dimensions, is_cylindrical=self.is_cylindrical)
+
+    # Every function that takes a user volume can be specified either by a volume
+    # (a Python Volume or a SWIG-wrapped meep::volume), or a center and a size
+    def _volume_from_kwargs(self, vol=None, center=None, size=None):
+        if vol:
+            if isinstance(vol, Volume):
+                # A pure Python Volume
+                return self._fit_volume_to_simulation(vol).swigobj
+            else:
+                # A SWIG-wrapped meep::volume
+                return vol
+        elif size and center:
+            return Volume(center, size=size, dims=self.dimensions, is_cylindrical=self.is_cylindrical).swigobj
+        else:
+            raise ValueError("Need either a Volume, or a size and center")
 
     def _infer_dimensions(self, k):
         if self.dimensions == 3:
@@ -318,10 +549,47 @@ class Simulation(object):
                 return 3
         return self.dimensions
 
-    def _init_structure(self, k=False):
-        print('-' * 11)
-        print('Initializing structure...')
+    def _get_valid_material_frequencies(self):
+        fmin = float('-inf')
+        fmax = float('inf')
 
+        for mat in [go.material for go in self.geometry] + self.extra_materials:
+            if isinstance(mat, mp.Medium) and mat.valid_freq_range:
+                if mat.valid_freq_range.min > fmin:
+                    fmin = mat.valid_freq_range.min
+                if mat.valid_freq_range.max < fmax:
+                    fmax = mat.valid_freq_range.max
+
+        return fmin, fmax
+
+    def _check_material_frequencies(self):
+
+        min_freq, max_freq = self._get_valid_material_frequencies()
+
+        source_freqs = [(s.src.frequency, 0 if s.src.width == 0 else 1 / s.src.width)
+                        for s in self.sources
+                        if hasattr(s.src, 'frequency')]
+
+        dft_freqs = []
+        for dftf in self.dft_objects:
+            dft_freqs.append(dftf.freq_min)
+            dft_freqs.append(dftf.freq_min + dftf.Nfreq * dftf.dfreq)
+
+        warn_src = ('Note: your sources include frequencies outside the range of validity of the ' +
+                    'material models. This is fine as long as you eventually only look at outputs ' +
+                    '(fluxes, resonant modes, etc.) at valid frequencies.')
+
+        warn_dft_fmt = "DFT frequency {} is out of material's range of {}-{}"
+
+        for sf in source_freqs:
+            if sf[0] + 0.5 * sf[1] > max_freq or sf[0] - 0.5 * sf[1] < min_freq:
+                warnings.warn(warn_src, RuntimeWarning)
+
+        for dftf in dft_freqs:
+            if dftf > max_freq or dftf < min_freq:
+                warnings.warn(warn_dft_fmt.format(dftf, min_freq, max_freq), RuntimeWarning)
+
+    def _create_grid_volume(self, k):
         dims = self._infer_dimensions(k)
 
         if dims == 0 or dims == 1:
@@ -339,6 +607,9 @@ class Simulation(object):
             raise ValueError("Unsupported dimentionality: {}".format(dims))
 
         gv.center_origin()
+        return gv
+
+    def _create_symmetries(self, gv):
         sym = mp.symmetry()
 
         # Initialize swig objects for each symmetry and combine them into one
@@ -357,6 +628,48 @@ class Simulation(object):
             else:
                 s.swigobj = mp.symmetry()
 
+        return sym
+
+    def _get_dft_volumes(self):
+        volumes = [self._volume_from_kwargs(vol=r.where if hasattr(r, 'where') else None,
+                                            center=r.center, size=r.size)
+                   for dft in self.dft_objects
+                   for r in dft.regions]
+
+        return volumes
+
+    def _compute_fragment_stats(self, gv):
+
+        def convert_volumes(dft_obj):
+            volumes = []
+            for r in dft_obj.regions:
+                volumes.append(self._volume_from_kwargs(vol=r.where if hasattr(r, 'where') else None,
+                                                        center=r.center, size=r.size))
+            return volumes
+
+        dft_data_list = [mp.dft_data(o.nfreqs, o.num_components, convert_volumes(o))
+                         for o in self.dft_objects]
+
+        stats = mp.compute_fragment_stats(
+            self.geometry,
+            gv,
+            self.cell_size,
+            mp.Vector3(),
+            self.default_material,
+            dft_data_list,
+            self.subpixel_tol,
+            self.subpixel_maxeval,
+            self.ensure_periodicity
+        )
+
+        return stats
+
+    def _init_structure(self, k=False):
+        print('-' * 11)
+        print('Initializing structure...')
+
+        gv = self._create_grid_volume(k)
+        sym = self._create_symmetries(gv)
         br = _create_boundary_region_from_boundary_layers(self.boundary_layers, gv)
 
         if self.boundary_layers and type(self.boundary_layers[0]) is Absorber:
@@ -364,9 +677,6 @@ class Simulation(object):
         else:
             absorbers = None
 
-        self.structure = mp.structure(gv, None, br, sym, self.num_chunks, self.courant,
-                                      self.eps_averaging, self.subpixel_tol, self.subpixel_maxeval)
-        self.structure.shared_chunks = True
         if self.material_function:
             self.material_function.eps = False
             self.default_material = self.material_function
@@ -376,9 +686,17 @@ class Simulation(object):
         elif self.epsilon_input_file:
             self.default_material = self.epsilon_input_file
 
+        self.fragment_stats = self._compute_fragment_stats(gv)
+
+        self.structure = mp.structure(gv, None, br, sym, self.num_chunks, self.Courant,
+                                      self.eps_averaging, self.subpixel_tol, self.subpixel_maxeval)
+        self.structure.shared_chunks = True
+
         mp.set_materials_from_geometry(self.structure, self.geometry, self.eps_averaging, self.subpixel_tol,
-                                       self.subpixel_maxeval, self.ensure_periodicity, False, self.default_material,
-                                       absorbers, self.extra_materials)
+                                       self.subpixel_maxeval, self.ensure_periodicity and not not self.k_point,
+                                       False, self.default_material, absorbers, self.extra_materials)
+        if self.load_structure_file:
+            self.load_structure(self.load_structure_file)
 
     def set_materials(self, geometry=None, default_material=None):
         if self.fields:
@@ -399,7 +717,30 @@ class Simulation(object):
             self.extra_materials
         )
 
-    def init_fields(self):
+    def load_structure(self, fname):
+        if self.structure is None:
+            raise ValueError("Fields must be initialized before calling load_structure")
+        self.structure.load(fname)
+
+    def dump_structure(self, fname):
+        if self.structure is None:
+            raise ValueError("Fields must be initialized before calling dump_structure")
+        self.structure.dump(fname)
+
+    def init_sim(self):
+
+        materials = [g.material for g in self.geometry if isinstance(g.material, mp.Medium)]
+        if isinstance(self.default_material, mp.Medium):
+            materials.append(self.default_material)
+        for med in materials:
+            if ((med.epsilon_diag.x < 1 and med.epsilon_diag.x > -mp.inf) or
+                (med.epsilon_diag.y < 1 and med.epsilon_diag.y > -mp.inf) or
+                (med.epsilon_diag.z < 1 and med.epsilon_diag.z > -mp.inf)):
+
+                eps_warning = ("Epsilon < 1 may require adjusting the Courant parameter. " +
+                               "See the 'Numerical Stability' entry under the 'Materials' " +
+                               "section of the documentation")
+                warnings.warn(eps_warning, RuntimeWarning)
 
         if self.structure is None:
             self._init_structure(self.k_point)
@@ -434,8 +775,12 @@ class Simulation(object):
         for s in self.sources:
             self.add_source(s)
 
-        for hook in self.init_fields_hooks:
+        for hook in self.init_sim_hooks:
             hook()
+
+    def init_fields(self):
+        warnings.warn('init_fields is deprecated. Please use init_sim instead', DeprecationWarning)
+        self.init_sim()
 
     def require_dimensions(self):
         if self.structure is None:
@@ -443,12 +788,12 @@ class Simulation(object):
 
     def meep_time(self):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
         return self.fields.time()
 
     def round_time(self):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
         return self.fields.round_time()
 
@@ -484,7 +829,7 @@ class Simulation(object):
                 mp.trash_output_directory(dname)
             closure['trashed'] = True
 
-        self.init_fields_hooks.append(hook)
+        self.init_sim_hooks.append(hook)
 
         if self.fields is not None:
             hook()
@@ -495,7 +840,7 @@ class Simulation(object):
     def _run_until(self, cond, step_funcs):
         self.interactive = False
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
         if isinstance(cond, numbers.Number):
             stop_time = cond
@@ -528,7 +873,7 @@ class Simulation(object):
 
     def _run_sources_until(self, cond, step_funcs):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
         ts = self.fields.last_source_time()
 
@@ -562,7 +907,7 @@ class Simulation(object):
         self.restart_fields()
 
         h = Harminv(components[0], pts[0], 0.5 * (fmin + fmax), fmax - fmin)
-        self._run_sources_until(t, [after_sources(h)])
+        self.run(after_sources(h), until_after_sources=t)
 
         return [complex(m.freq, m.decay) for m in h.modes]
 
@@ -574,7 +919,7 @@ class Simulation(object):
             k_index += 1
 
             if k_index == 1:
-                self.init_fields()
+                self.init_sim()
                 output_epsilon(self)
 
             freqs = self._run_k_point(t, k)
@@ -590,13 +935,13 @@ class Simulation(object):
 
     def set_epsilon(self, eps):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
         self.structure.set_epsilon(eps, self.eps_averaging, self.subpixel_tol, self.subpixel_maxeval)
 
     def add_source(self, src):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
         where = Volume(src.center, src.size, dims=self.dimensions,
                        is_cylindrical=self.is_cylindrical).swigobj
@@ -610,106 +955,134 @@ class Simulation(object):
             eig_vol = Volume(src.eig_lattice_center, src.eig_lattice_size, self.dimensions,
                              is_cylindrical=self.is_cylindrical).swigobj
 
-            if src.amp_func is None:
-                self.fields.add_eigenmode_source(
-                    src.component,
-                    src.src.swigobj,
-                    direction,
-                    where,
-                    eig_vol,
-                    src.eig_band,
-                    py_v3_to_vec(self.dimensions, src.eig_kpoint, is_cylindrical=self.is_cylindrical),
-                    src.eig_match_freq,
-                    src.eig_parity,
-                    src.eig_resolution,
-                    src.eig_tolerance,
-                    src.amplitude
-                )
-            else:
-                self.fields.add_eigenmode_source(
-                    src.component,
-                    src.src.swigobj,
-                    direction,
-                    where,
-                    eig_vol,
-                    src.eig_band,
-                    py_v3_to_vec(self.dimensions, src.eig_kpoint, is_cylindrical=self.is_cylindrical),
-                    src.eig_parity,
-                    src.eig_resolution,
-                    src.eig_tolerance,
-                    src.amplitude,
-                    src.amp_func
-                )
-        else:
-            if src.amp_func is None:
-                self.fields.add_volume_source(
-                    src.component,
-                    src.src.swigobj,
-                    where,
-                    src.amplitude * 1.0,
-                )
-            else:
-                self.fields.add_volume_source(
-                    src.component,
-                    src.src.swigobj,
-                    where,
-                    src.amp_func,
-                    src.amplitude * 1.0
-                )
+            add_eig_src_args = [
+                src.component,
+                src.src.swigobj,
+                direction,
+                where,
+                eig_vol,
+                src.eig_band,
+                py_v3_to_vec(self.dimensions, src.eig_kpoint, is_cylindrical=self.is_cylindrical),
+                src.eig_match_freq,
+                src.eig_parity,
+                src.eig_resolution,
+                src.eig_tolerance,
+                src.amplitude
+            ]
+            add_eig_src = functools.partial(self.fields.add_eigenmode_source, *add_eig_src_args)
 
-    def add_dft_fields(self, components, freq_min, freq_max, nfreq, where=None):
+            if src.amp_func is None:
+                add_eig_src()
+            else:
+                add_eig_src(src.amp_func)
+        else:
+            add_vol_src_args = [src.component, src.src.swigobj, where]
+            add_vol_src = functools.partial(self.fields.add_volume_source, *add_vol_src_args)
+
+            if src.amp_func_file:
+                fname_dset = src.amp_func_file.rsplit(':', 1)
+                if len(fname_dset) != 2:
+                    err_msg = "Expected a string of the form 'h5filename:dataset'. Got '{}'"
+                    raise ValueError(err_msg.format(src.amp_func_file))
+
+                fname, dset = fname_dset
+                if not fname.endswith('.h5'):
+                    fname += '.h5'
+
+                add_vol_src(fname, dset, src.amplitude * 1.0,)
+            elif src.amp_func:
+                add_vol_src(src.amp_func, src.amplitude * 1.0)
+            elif src.amp_data is not None:
+                add_vol_src(src.amp_data, src.amplitude * 1.0,)
+            else:
+                add_vol_src(src.amplitude * 1.0)
+
+    def _evaluate_dft_objects(self):
+        for dft in self.dft_objects:
+            if dft.swigobj is None:
+                dft.swigobj = dft.func(*dft.args)
+
+    def add_dft_fields(self, components, freq_min, freq_max, nfreq, where=None, center=None, size=None):
+        dftf = DftFields(self._add_dft_fields, [components, where, center, size, freq_min, freq_max, nfreq])
+        self.dft_objects.append(dftf)
+        return dftf
+
+    def _add_dft_fields(self, components, where, center, size, freq_min, freq_max, nfreq):
         if self.fields is None:
-            self.init_fields()
-
-        if where is None:
+            self.init_sim()
+        try:
+            where = self._volume_from_kwargs(where, center, size)
+        except ValueError:
             where = self.fields.total_volume()
-        else:
-            where = self._fit_volume_to_simulation(where).swigobj
 
         return self.fields.add_dft_fields(components, where, freq_min, freq_max, nfreq)
 
-    def output_dft(self, dft_fields, fname, where=None):
+    def output_dft(self, dft_fields, fname):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
-        if where is None:
-            where = self.fields.total_volume()
+        if hasattr(dft_fields, 'swigobj'):
+            dft_fields_swigobj = dft_fields.swigobj
         else:
-            where = self._fit_volume_to_simulation(where).swigobj
+            dft_fields_swigobj = dft_fields
 
-        self.fields.output_dft(dft_fields, fname, where)
+        self.fields.output_dft(dft_fields_swigobj, fname)
+
+    def get_dft_data(self, dft_chunk):
+        n = mp._get_dft_data_size(dft_chunk)
+        arr = np.zeros(n, np.complex128)
+        mp._get_dft_data(dft_chunk, arr)
+        return arr
 
     def add_near2far(self, fcen, df, nfreq, *near2fars):
-        if self.fields is None:
-            self.init_fields()
+        n2f = DftNear2Far(self._add_near2far, [fcen, df, nfreq, near2fars])
+        self.dft_objects.append(n2f)
+        return n2f
 
+    def _add_near2far(self, fcen, df, nfreq, near2fars):
+        if self.fields is None:
+            self.init_sim()
         return self._add_fluxish_stuff(self.fields.add_dft_near2far, fcen, df, nfreq, near2fars)
 
     def get_farfield(self, f, v):
-        return mp._get_farfield(f, py_v3_to_vec(self.dimensions, v, is_cylindrical=self.is_cylindrical))
+        return mp._get_farfield(f.swigobj, py_v3_to_vec(self.dimensions, v, is_cylindrical=self.is_cylindrical))
 
-    def output_farfields(self, near2far, fname, where, resolution):
-        vol = self._fit_volume_to_simulation(where)
-        near2far.save_farfields(fname, self.get_filename_prefix(), vol.swigobj, resolution)
+    def output_farfields(self, near2far, fname, resolution, where=None, center=None, size=None):
+        vol = self._volume_from_kwargs(where, center, size)
+        near2far.save_farfields(fname, self.get_filename_prefix(), vol, resolution)
 
     def load_near2far(self, fname, n2f):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
         n2f.load_hdf5(self.fields, fname, '', self.get_filename_prefix())
 
     def save_near2far(self, fname, n2f):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
         n2f.save_hdf5(self.fields, fname, '', self.get_filename_prefix())
 
     def load_minus_near2far(self, fname, n2f):
         self.load_near2far(fname, n2f)
         n2f.scale_dfts(-1.0)
 
-    def add_force(self, fcen, df, nfreq, *forces):
-        if self.fields is None:
-            self.init_fields()
+    def get_near2far_data(self, n2f):
+        return NearToFarData(F=self.get_dft_data(n2f.F))
 
+    def load_near2far_data(self, n2f, n2fdata):
+        mp._load_dft_data(n2f.F, n2fdata.F)
+
+    def load_minus_near2far_data(self, n2f, n2fdata):
+        self.load_near2far_data(n2f, n2fdata)
+        n2f.scale_dfts(complex(1.0))
+
+    def add_force(self, fcen, df, nfreq, *forces):
+        force = DftForce(self._add_force, [fcen, df, nfreq, forces])
+        self.dft_objects.append(force)
+        return force
+
+    def _add_force(self, fcen, df, nfreq, forces):
+        if self.fields is None:
+            self.init_sim()
         return self._add_fluxish_stuff(self.fields.add_dft_force, fcen, df, nfreq, forces)
 
     def display_forces(self, *forces):
@@ -718,36 +1091,77 @@ class Simulation(object):
 
     def load_force(self, fname, force):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
         force.load_hdf5(self.fields, fname, '', self.get_filename_prefix())
 
     def save_force(self, fname, force):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
         force.save_hdf5(self.fields, fname, '', self.get_filename_prefix())
 
     def load_minus_force(self, fname, force):
         self.load_force(fname, force)
         force.scale_dfts(-1.0)
 
-    def add_flux(self, fcen, df, nfreq, *fluxes):
-        if self.fields is None:
-            self.init_fields()
+    def get_force_data(self, force):
+        return ForceData(offdiag1=self.get_dft_data(force.offdiag1),
+                         offdiag2=self.get_dft_data(force.offdiag2),
+                         diag=self.get_dft_data(force.diag))
 
+    def load_force_data(self, force, fdata):
+        mp._load_dft_data(force.offdiag1, fdata.offdiag1)
+        mp._load_dft_data(force.offdiag2, fdata.offdiag2)
+        mp._load_dft_data(force.diag, fdata.diag)
+
+    def load_minus_force_data(self, force, fdata):
+        self.load_force_data(force, fdata)
+        force.scale_dfts(complex(-1.0))
+
+    def add_flux(self, fcen, df, nfreq, *fluxes):
+        flux = DftFlux(self._add_flux, [fcen, df, nfreq, fluxes])
+        self.dft_objects.append(flux)
+        return flux
+
+    def _add_flux(self, fcen, df, nfreq, fluxes):
+        if self.fields is None:
+            self.init_sim()
         return self._add_fluxish_stuff(self.fields.add_dft_flux, fcen, df, nfreq, fluxes)
+
+    def add_mode_monitor(self, fcen, df, nfreq, *fluxes):
+        flux = DftFlux(self._add_mode_monitor, [fcen, df, nfreq, fluxes])
+        self.dft_objects.append(flux)
+        return flux
+
+    def _add_mode_monitor(self, fcen, df, nfreq, fluxes):
+        if self.fields is None:
+            self.init_sim()
+
+        if len(fluxes) != 1:
+            raise ValueError("add_mode_monitor expected just one ModeRegion. Got {}".format(len(fluxes)))
+
+        region = fluxes[0]
+        v = mp.Volume(region.center, region.size, dims=self.dimensions, is_cylindrical=self.is_cylindrical)
+        d0 = region.direction
+        d = self.fields.normal_direction(v.swigobj) if d0 < 0 else d0
+
+        return self.fields.add_mode_monitor(d, v.swigobj, fcen - df / 2, fcen + df / 2, nfreq)
+
+    def add_eigenmode(self, fcen, df, nfreq, *fluxes):
+        warnings.warn('add_eigenmode is deprecated. Please use add_mode_monitor instead.', DeprecationWarning)
+        return self.add_mode_monitor(fcen, df, nfreq, *fluxes)
 
     def display_fluxes(self, *fluxes):
         display_csv(self, 'flux', zip(get_flux_freqs(fluxes[0]), *[get_fluxes(f) for f in fluxes]))
 
     def load_flux(self, fname, flux):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
         flux.load_hdf5(self.fields, fname, '', self.get_filename_prefix())
 
     def save_flux(self, fname, flux):
         if self.fields is None:
-            self.init_fields()
+            self.init_sim()
 
         flux.save_hdf5(self.fields, fname, '', self.get_filename_prefix())
 
@@ -755,50 +1169,57 @@ class Simulation(object):
         self.load_flux(fname, flux)
         flux.scale_dfts(complex(-1.0))
 
-    def flux_in_box(self, d, box):
+    def get_flux_data(self, flux):
+        return FluxData(E=self.get_dft_data(flux.E), H=self.get_dft_data(flux.H))
+
+    def load_flux_data(self, flux, fdata):
+        mp._load_dft_data(flux.E, fdata.E)
+        mp._load_dft_data(flux.H, fdata.H)
+
+    def load_minus_flux_data(self, flux, fdata):
+        self.load_flux_data(flux, fdata)
+        flux.scale_dfts(complex(-1.0))
+
+    def flux_in_box(self, d, box=None, center=None, size=None):
         if self.fields is None:
             raise RuntimeError('Fields must be initialized before using flux_in_box')
 
-        if isinstance(box, mp.Volume):
-            box = self._fit_volume_to_simulation(box).swigobj
+        box = self._volume_from_kwargs(box, center, size)
 
         return self.fields.flux_in_box(d, box)
 
-    def electric_energy_in_box(self, box):
+    def electric_energy_in_box(self, box=None, center=None, size=None):
         if self.fields is None:
             raise RuntimeError('Fields must be initialized before using electric_energy_in_box')
 
-        if isinstance(box, mp.Volume):
-            box = self._fit_volume_to_simulation(box).swigobj
+        box = self._volume_from_kwargs(box, center, size)
 
         return self.fields.electric_energy_in_box(box)
 
-    def magnetic_energy_in_box(self, box):
+    def magnetic_energy_in_box(self, box=None, center=None, size=None):
         if self.fields is None:
             raise RuntimeError('Fields must be initialized before using magnetic_energy_in_box')
 
-        if isinstance(box, mp.Volume):
-            box = self._fit_volume_to_simulation(box).swigobj
+        box = self._volume_from_kwargs(box, center, size)
 
         return self.fields.magnetic_energy_in_box(box)
 
-    def field_energy_in_box(self, box):
+    def field_energy_in_box(self, box=None, center=None, size=None):
         if self.fields is None:
             raise RuntimeError('Fields must be initialized before using field_energy_in_box')
 
-        if isinstance(box, mp.Volume):
-            box = self._fit_volume_to_simulation(box).swigobj
+        box = self._volume_from_kwargs(box, center, size)
 
         return self.fields.field_energy_in_box(box)
 
-    def modal_volume_in_box(self, box=None):
+    def modal_volume_in_box(self, box=None, center=None, size=None):
         if self.fields is None:
             raise RuntimeError('Fields must be initialized before using modal_volume_in_box')
 
-        if box is None:
+        try:
+            box = self._volume_from_kwargs(box, center, size)
+        except ValueError:
             box = self.fields.total_volume()
-        else:
-            box = self._fit_volume_to_simulation(box).swigobj
 
         return self.fields.modal_volume_in_box(box)
 
@@ -856,9 +1277,6 @@ class Simulation(object):
                 f.prevent_deadlock()
 
         if self.output_append_h5 is None:
-            f = None
-
-        if self.output_append_h5 is None:
             self.output_h5_hook(self.fields.h5file_name(fname, self.get_filename_prefix(), True))
 
     def h5topng(self, rm_h5, option, *step_funcs):
@@ -866,10 +1284,15 @@ class Simulation(object):
         cmd = re.sub(r'\$EPS', self.last_eps_filename, opts)
         return convert_h5(rm_h5, cmd, *step_funcs)
 
-    def get_array(self, center, size, component=mp.Ez, cmplx=None, arr=None):
-        dim_sizes = np.zeros(3, dtype=np.int32)
-        vol = Volume(center, size=size, dims=self.dimensions, is_cylindrical=self.is_cylindrical)
-        self.fields.get_array_slice_dimensions(vol.swigobj, dim_sizes)
+    def get_array(self, vol=None, center=None, size=None, component=mp.Ez, cmplx=None, arr=None):
+        dim_sizes = np.zeros(3, dtype=np.uintp)
+
+        if vol is None and center is None and size is None:
+            v = self.fields.total_volume()
+        else:
+            v = self._volume_from_kwargs(vol, center, size)
+
+        self.fields.get_array_slice_dimensions(v, dim_sizes)
 
         dims = [s for s in dim_sizes if s != 0]
 
@@ -891,11 +1314,74 @@ class Simulation(object):
             arr = np.zeros(dims, dtype=np.complex128 if cmplx else np.float64)
 
         if np.iscomplexobj(arr):
-            self.fields.get_complex_array_slice(vol.swigobj, component, arr)
+            self.fields.get_complex_array_slice(v, component, arr)
         else:
-            self.fields.get_array_slice(vol.swigobj, component, arr)
+            self.fields.get_array_slice(v, component, arr)
 
         return arr
+
+    def get_dft_array(self, dft_obj, component, num_freq):
+        if hasattr(dft_obj, 'swigobj'):
+            dft_swigobj = dft_obj.swigobj
+        else:
+            dft_swigobj = dft_obj
+
+        if type(dft_swigobj) is mp.dft_fields:
+            return mp.get_dft_fields_array(self.fields, dft_swigobj, component, num_freq)
+        elif type(dft_swigobj) is mp.dft_flux:
+            return mp.get_dft_flux_array(self.fields, dft_swigobj, component, num_freq)
+        elif type(dft_swigobj) is mp.dft_force:
+            return mp.get_dft_force_array(self.fields, dft_swigobj, component, num_freq)
+        elif type(dft_swigobj) is mp.dft_near2far:
+            return mp.get_dft_near2far_array(self.fields, dft_swigobj, component, num_freq)
+        else:
+            raise ValueError("Invalid type of dft object: {}".format(dft_swigobj))
+
+    def get_eigenmode_coefficients(self, flux, bands, eig_parity=mp.NO_PARITY,
+                                   eig_vol=None, eig_resolution=0, eig_tolerance=1e-7, kpoint_func=None):
+        if self.fields is None:
+            raise ValueError("Fields must be initialized before calling get_eigenmode_coefficients")
+        if eig_vol is None:
+            eig_vol = flux.where
+        else:
+            eig_vol = self._volume_from_kwargs(vol=eig_vol)
+
+        num_bands = len(bands)
+        coeffs = np.zeros(2 * num_bands * flux.Nfreq, dtype=np.complex128)
+        vgrp = np.zeros(num_bands * flux.Nfreq)
+
+        kpoints = mp.get_eigenmode_coefficients_and_kpoints(
+            self.fields,
+            flux.swigobj,
+            eig_vol,
+            np.array(bands, dtype=np.intc),
+            eig_parity,
+            eig_resolution,
+            eig_tolerance,
+            coeffs,
+            vgrp,
+            kpoint_func
+        )
+
+        return np.reshape(coeffs, (num_bands, flux.Nfreq, 2)), vgrp, kpoints
+
+    def get_eigenmode(self, omega_src, direction, where, band_num, kpoint, eig_vol=None, match_frequency=True,
+                      parity=mp.NO_PARITY, resolution=0, eigensolver_tol=1e-7, verbose=False):
+
+        if self.fields is None:
+            raise ValueError("Fields must be initialized before calling get_eigenmode")
+
+        where = self._volume_from_kwargs(vol=where)
+        if eig_vol is None:
+            eig_vol = where
+        else:
+            eig_vol = self._volume_from_kwargs(vol=eig_vol)
+
+        swig_kpoint = mp.vec(kpoint.x, kpoint.y, kpoint.z)
+        emdata = mp._get_eigenmode(self.fields, omega_src, direction, where, eig_vol, band_num, swig_kpoint,
+                                   match_frequency, parity, resolution, eigensolver_tol, verbose)
+
+        return EigenmodeData(emdata.band_num, emdata.omega, emdata.group_velocity, emdata.Gk, emdata.data)
 
     def output_field_function(self, name, cs, func, real_only=False, h5file=None):
         if self.fields is None:
@@ -910,23 +1396,24 @@ class Simulation(object):
         if h5file is None:
             self.output_h5_hook(self.fields.h5file_name(name, self.get_filename_prefix(), True))
 
-    def _get_field_function_volume(self, where):
-        if where is None:
+    def _get_field_function_volume(self, where=None, center=None, size=None):
+        try:
+            where = self._volume_from_kwargs(where, center, size)
+        except ValueError:
             where = self.fields.total_volume()
-        else:
-            where = self._fit_volume_to_simulation(where).swigobj
+
         return where
 
-    def integrate_field_function(self, cs, func, where=None):
-        where = self._get_field_function_volume(where)
+    def integrate_field_function(self, cs, func, where=None, center=None, size=None):
+        where = self._get_field_function_volume(where, center, size)
         return self.fields.integrate([cs, func], where)
 
-    def integrate2_field_function(self, fields2, cs1, cs2, func, where=None):
-        where = self._get_field_function_volume(where)
+    def integrate2_field_function(self, fields2, cs1, cs2, func, where=None, center=None, size=None):
+        where = self._get_field_function_volume(where, center, size)
         return self.fields.integrate2(fields2, [cs1, cs2, func], where)
 
-    def max_abs_field_function(self, cs, func, where=None):
-        where = self._get_field_function_volume(where)
+    def max_abs_field_function(self, cs, func, where=None, center=None, size=None):
+        where = self._get_field_function_volume(where, center, size)
         return self.fields.max_abs([cs, func], where)
 
     def change_k_point(self, k):
@@ -937,32 +1424,39 @@ class Simulation(object):
 
             if needs_complex_fields and self.fields.is_real:
                 self.fields = None
-                self.init_fields()
+                self.init_sim()
             else:
                 if self.k_point:
                     self.fields.use_bloch(py_v3_to_vec(self.dimensions, self.k_point, self.is_cylindrical))
 
     def change_sources(self, new_sources):
-        self.sources = new_sources if type(new_sources) is list else [new_sources]
+        self.sources = new_sources
         if self.fields:
             self.fields.remove_sources()
-            for s in new_sources:
+            for s in self.sources:
                 self.add_source(s)
 
     def reset_meep(self):
         self.fields = None
         self.structure = None
+        self.dft_objects = []
 
     def restart_fields(self):
         if self.fields is not None:
             self.fields.t = 0
             self.fields.zero_fields()
         else:
-            self.init_fields()
+            self.init_sim()
 
     def run(self, *step_funcs, **kwargs):
         until = kwargs.pop('until', None)
         until_after_sources = kwargs.pop('until_after_sources', None)
+
+        if self.fields is None:
+            self.init_sim()
+
+        self._evaluate_dft_objects()
+        self._check_material_frequencies()
 
         if kwargs:
             raise ValueError("Unrecognized keyword arguments: {}".format(kwargs.keys()))
@@ -973,6 +1467,151 @@ class Simulation(object):
             self._run_until(until, step_funcs)
         else:
             raise ValueError("Invalid run configuration")
+
+    def get_epsilon(self):
+        return self.get_array(component=mp.Dielectric)
+
+    def get_mu(self):
+        return self.get_array(component=mp.Permeability)
+
+    def get_hpwr(self):
+        return self.get_array(component=mp.H_EnergyDensity)
+
+    def get_dpwr(self):
+        return self.get_array(component=mp.D_EnergyDensity)
+
+    def get_tot_pwr(self):
+        return self.get_array(component=mp.EnergyDensity)
+
+    def get_hfield(self):
+        if self.is_cylindrical:
+            r = self.get_array(cmplx=True, component=mp.Hr)
+            p = self.get_array(cmplx=True, component=mp.Hp)
+            return np.stack([r, p], axis=-1)
+        else:
+            x = self.get_array(cmplx=True, component=mp.Hx)
+            y = self.get_array(cmplx=True, component=mp.Hy)
+            z = self.get_array(cmplx=True, component=mp.Hz)
+            return np.stack([x, y, z], axis=-1)
+
+    def get_hfield_x(self):
+        return self.get_array(cmplx=True, component=mp.Hx)
+
+    def get_hfield_y(self):
+        return self.get_array(cmplx=True, component=mp.Hy)
+
+    def get_hfield_z(self):
+        return self.get_array(cmplx=True, component=mp.Hz)
+
+    def get_hfield_r(self):
+        return self.get_array(cmplx=True, component=mp.Hr)
+
+    def get_hfield_p(self):
+        return self.get_array(cmplx=True, component=mp.Hp)
+
+    def get_bfield(self):
+        if self.is_cylindrical:
+            r = self.get_array(cmplx=True, component=mp.Br)
+            p = self.get_array(cmplx=True, component=mp.Bp)
+            return np.stack([r, p], axis=-1)
+        else:
+            x = self.get_array(cmplx=True, component=mp.Bx)
+            y = self.get_array(cmplx=True, component=mp.By)
+            z = self.get_array(cmplx=True, component=mp.Bz)
+            return np.stack([x, y, z], axis=-1)
+
+    def get_bfield_x(self):
+        return self.get_array(cmplx=True, component=mp.Bx)
+
+    def get_bfield_y(self):
+        return self.get_array(cmplx=True, component=mp.By)
+
+    def get_bfield_z(self):
+        return self.get_array(cmplx=True, component=mp.Bz)
+
+    def get_bfield_r(self):
+        return self.get_array(cmplx=True, component=mp.Br)
+
+    def get_bfield_p(self):
+        return self.get_array(cmplx=True, component=mp.Bp)
+
+    def get_efield(self):
+        if self.is_cylindrical:
+            r = self.get_array(cmplx=True, component=mp.Er)
+            p = self.get_array(cmplx=True, component=mp.Ep)
+            return np.stack([r, p], axis=-1)
+        else:
+            x = self.get_array(cmplx=True, component=mp.Ex)
+            y = self.get_array(cmplx=True, component=mp.Ey)
+            z = self.get_array(cmplx=True, component=mp.Ez)
+            return np.stack([x, y, z], axis=-1)
+
+    def get_efield_x(self):
+        return self.get_array(cmplx=True, component=mp.Ex)
+
+    def get_efield_y(self):
+        return self.get_array(cmplx=True, component=mp.Ey)
+
+    def get_efield_z(self):
+        return self.get_array(cmplx=True, component=mp.Ez)
+
+    def get_efield_r(self):
+        return self.get_array(cmplx=True, component=mp.Er)
+
+    def get_efield_p(self):
+        return self.get_array(cmplx=True, component=mp.Ep)
+
+    def get_dfield(self):
+        if self.is_cylindrical:
+            r = self.get_array(cmplx=True, component=mp.Dr)
+            p = self.get_array(cmplx=True, component=mp.Dp)
+            return np.stack([r, p], axis=-1)
+        else:
+            x = self.get_array(cmplx=True, component=mp.Dx)
+            y = self.get_array(cmplx=True, component=mp.Dy)
+            z = self.get_array(cmplx=True, component=mp.Dz)
+            return np.stack([x, y, z], axis=-1)
+
+    def get_dfield_x(self):
+        return self.get_array(cmplx=True, component=mp.Dx)
+
+    def get_dfield_y(self):
+        return self.get_array(cmplx=True, component=mp.Dy)
+
+    def get_dfield_z(self):
+        return self.get_array(cmplx=True, component=mp.Dz)
+
+    def get_dfield_r(self):
+        return self.get_array(cmplx=True, component=mp.Dr)
+
+    def get_dfield_p(self):
+        return self.get_array(cmplx=True, component=mp.Dp)
+
+    def get_sfield(self):
+        if self.is_cylindrical:
+            r = self.get_array(cmplx=True, component=mp.Sr)
+            p = self.get_array(cmplx=True, component=mp.Sp)
+            return np.stack([r, p], axis=-1)
+        else:
+            x = self.get_array(cmplx=True, component=mp.Sx)
+            y = self.get_array(cmplx=True, component=mp.Sy)
+            z = self.get_array(cmplx=True, component=mp.Sz)
+            return np.stack([x, y, z], axis=-1)
+
+    def get_sfield_x(self):
+        return self.get_array(cmplx=True, component=mp.Sx)
+
+    def get_sfield_y(self):
+        return self.get_array(cmplx=True, component=mp.Sy)
+
+    def get_sfield_z(self):
+        return self.get_array(cmplx=True, component=mp.Sz)
+
+    def get_sfield_r(self):
+        return self.get_array(cmplx=True, component=mp.Sr)
+
+    def get_sfield_p(self):
+        return self.get_array(cmplx=True, component=mp.Sp)
 
 
 def _create_boundary_region_from_boundary_layers(boundary_layers, gv):
@@ -1257,11 +1896,10 @@ def display_progress(t0, t, dt):
         if t1 - closure['tlast'] >= dt:
             msg_fmt = "Meep progress: {}/{} = {:.1f}% done in {:.1f}s, {:.1f}s to go"
             val1 = sim.meep_time() - t0
-            val2 = t
-            val3 = (sim.meep_time() - t0) / (0.01 * t)
-            val4 = t1 - t_0
-            val5 = ((t1 - t_0) * (t / (sim.meep_time() - t0)) - (t1 - t_0))
-            print(msg_fmt.format(val1, val2, val3, val4, val5))
+            val2 = val1 / (0.01 * t)
+            val3 = t1 - t_0
+            val4 = (val3 * (t / val1) - val3) if val1 != 0 else 0
+            print(msg_fmt.format(val1, t, val2, val3, val4))
             closure['tlast'] = t1
     return _disp
 
@@ -1312,7 +1950,7 @@ def output_png(compnt, options, rm_h5=True):
             if sim.output_volume is None:
                 ov = sim.fields.total_volume()
             else:
-                ov = sim.output_volume.swigobj
+                ov = sim.output_volume
 
             closure['maxabs'] = max(closure['maxabs'],
                                     sim.fields.max_abs(compnt, ov))
@@ -1523,6 +2161,10 @@ def scale_force_fields(s, force):
     force.scale_dfts(s)
 
 
+def get_eigenmode_freqs(f):
+    return np.linspace(f.freq_min, f.freq_min + f.dfreq * f.Nfreq, num=f.Nfreq, endpoint=False).tolist()
+
+
 def get_force_freqs(f):
     return np.linspace(f.freq_min, f.freq_min + f.dfreq * f.Nfreq, num=f.Nfreq, endpoint=False).tolist()
 
@@ -1554,3 +2196,5 @@ def interpolate(n, nums):
             res.extend(np.linspace(low, high, n + 1, endpoint=False).tolist())
 
     return res + [nums[-1]]
+
+

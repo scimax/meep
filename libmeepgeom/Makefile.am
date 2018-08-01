@@ -9,11 +9,12 @@ pkginclude_HEADERS = meepgeom.hpp material_data.hpp
 AM_CPPFLAGS = -I$(top_srcdir)/src -DDATADIR=\"$(srcdir)/\"
 
 libmeepgeom_la_SOURCES = \
- meepgeom.cpp meepgeom.hpp material_data.hpp
+ meepgeom.cpp GDSIIgeom.cpp meepgeom.hpp material_data.hpp
 
 libmeepgeom_la_LDFLAGS = -version-info @SHARED_VERSION_INFO@
+libmeepgeom_la_LIBADD = $(LIBMEEP)
 
-check_PROGRAMS      = pw-source-ll ring-ll cyl-ellipsoid-ll absorber-1d-ll array-slice-ll user-defined-material dft-fields
+check_PROGRAMS      = pw-source-ll ring-ll cyl-ellipsoid-ll absorber-1d-ll array-slice-ll user-defined-material dft-fields gdsII-3d
 
 absorber_1d_ll_SOURCES = absorber-1d-ll.cpp
 absorber_1d_ll_LDADD   = libmeepgeom.la $(MEEPLIBS)
@@ -33,7 +34,13 @@ array_slice_ll_LDADD   = libmeepgeom.la $(MEEPLIBS)
 dft_fields_SOURCES = dft-fields.cpp
 dft_fields_LDADD   = libmeepgeom.la $(MEEPLIBS)
 
+gdsII_3d_SOURCES = gdsII-3d.cpp
+gdsII_3d_LDADD   = libmeepgeom.la $(MEEPLIBS)
+
 TESTS           = cyl-ellipsoid-ll array-slice-ll
+TESTS_ENVIRONMENT = export LD_PRELOAD=$(abs_top_builddir)/src/.libs/libmeep.so;
+
+#LOG_COMPILER = $(RUNCODE)
 
 #LOG_COMPILER = $(RUNCODE)
 

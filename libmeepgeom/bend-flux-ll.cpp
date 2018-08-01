@@ -39,24 +39,63 @@ vector3 v3(double x, double y=0.0, double z=0.0)
 double dummy_eps(const vec &) { return 1.0; }
 
 /***************************************************************/
+/* define geometry from GDSII file *****************************/
+/***************************************************************/
+#define GEOM_LAYER           0   // hard-coded indices of GDSII layers
+#define STRAIGHT_WVG_LAYER   1   //  on which various geometric entities are defined
+#define BENT_WVG_LAYER       2
+#define SOURCE_LAYER         3
+#define RFLUX_LAYER          4
+#define STRAIGHT_TFLUX_LAYER 5
+#define BENT_TFLUX_LAYER     6
+
+structure create_structure_from_GDSII(char *GDSIIFile, bool no_bend,
+                                      volume &vsrc, volume &vrefl, volume &vtrans)
+{
+  // set computational cell
+  double dpml       = 1.0;
+  double resolution = 10.0;
+  grid_volume gv=meep_geom::set_geometry_from_GDSII(resolution, GDSIIFile, GEOM_LAYER);
+  structure the_structure(gv, dummy_eps, pml(dpml));
+
+  // define waveguide
+  geometric_object objects[1];
+  meep_geom::material_type dielectric = meep_geom::make_dielectric(12.0);
+  int GDSIILayer = (no_bend ? STRAIGHT_WVG_LAYER : BENT_WVG_LAYER);
+  objects[0] = meep_geom::get_GDSII_prism(dielectric, GDSIIFile, GDSIILayer);
+  geometric_object_list g={ 1, objects };
+  meep_geom::set_materials_from_geometry(&the_structure, g);
+
+  // define volumes for source and flux-monitor regions
+  vsrc   = meep_geom::get_GDSII_volume(GDSIIFile, SOURCE_LAYER);
+  vrefl  = meep_geom::get_GDSII_volume(GDSIIFile, RFLUX_LAYER);
+  vtrans = meep_geom::get_GDSII_volume(GDSIIFile, (no_bend ? STRAIGHT_TFLUX_LAYER : BENT_TFLUX_LAYER));
+
+  return the_structure;
+
+}
+
 /***************************************************************/
 /***************************************************************/
-void bend_flux(bool no_bend)
+/***************************************************************/
+structure create_structure_by_hand(bool no_bend, bool use_prisms,
+                                   volume &vsrc, volume &vrefl, volume &vtrans)
 {
   double sx=16.0;       // size of cell in X direction
   double sy=32.0;       // size of cell in Y direction
   double pad=4.0;       // padding distance between waveguide and cell edge
   double w=1.0;         // width of waveguide
-  double resolution=10; // (set-param! resolution 10)
+  double dpml=1.0;      // PML thickness
+  double resolution=10.0;
 
   // (set! geometry-lattice (make lattice (size sx sy no-size)))
   // (set! pml-layers (list (make pml (thickness 1.0))))
-  geometry_lattice.size.x=16.0;
-  geometry_lattice.size.y=32.0;
+  geometry_lattice.size.x=sx;
+  geometry_lattice.size.y=sy;
   geometry_lattice.size.z=0.0;
   grid_volume gv = voltwo(sx, sy, resolution);
   gv.center_origin();
-  structure the_structure(gv, dummy_eps, pml(1.0));
+  structure the_structure(gv, dummy_eps, pml(dpml));
 
   double wvg_ycen = -0.5*(sy - w - 2.0*pad); //y center of horiz. wvg
   double wvg_xcen =  0.5*(sx - w - 2.0*pad); //x center of vert. wvg
@@ -84,33 +123,79 @@ void bend_flux(bool no_bend)
    meep_geom::material_type dielectric = meep_geom::make_dielectric(12.0);
    if (no_bend)
     {
-      geometric_object objects[1];
-      objects[0] = make_block(dielectric,
-                              v3(0.0, wvg_ycen),
-                              e1, e2, e3,
-                              v3(ENORMOUS, w, ENORMOUS)
-                             );
-      geometric_object_list g={ 1, objects };
-      meep_geom::set_materials_from_geometry(&the_structure, g);
+      if (use_prisms)
+       { vector3 vertices[4];
+         vertices[0]=v3(-0.5*sx, wvg_ycen - 0.5*w, 0.0);
+         vertices[1]=v3(+0.5*sx, wvg_ycen - 0.5*w, 0.0);
+         vertices[2]=v3(+0.5*sx, wvg_ycen + 0.5*w, 0.0);
+         vertices[3]=v3(-0.5*sx, wvg_ycen + 0.5*w, 0.0);
+         double height=0.0;
+         vector3 axis=v3(0.0,0.0,1.0);
+         geometric_object objects[1];
+         objects[0] = make_prism( dielectric, vertices, 4, height, axis);
+         geometric_object_list g={ 1, objects };
+         meep_geom::set_materials_from_geometry(&the_structure, g);
+       }
+      else 
+       {
+         vector3 center = v3(0.0, wvg_ycen, 0.0);
+         vector3 size   = v3(sx,  w,        0.0);
+         geometric_object objects[1];
+         objects[0] = make_block( dielectric, center, e1, e2, e3, size );
+         geometric_object_list g={ 1, objects };
+         meep_geom::set_materials_from_geometry(&the_structure, g);
+       }
     }
    else
     {
-      geometric_object objects[2];
-      objects[0] = make_block(dielectric,
-                              v3(-0.5*pad, wvg_ycen),
-                              e1, e2, e3,
-                              v3(sx-pad, w, ENORMOUS)
-                             );
+      if (use_prisms)
+       { vector3 vertices[6];
+         vertices[0]=v3(        -0.5*sx, wvg_ycen -0.5*w);
+         vertices[1]=v3(wvg_xcen+0.5*w,  wvg_ycen -0.5*w);
+         vertices[2]=v3(wvg_xcen+0.5*w,           +0.5*sy);
+         vertices[3]=v3(wvg_xcen-0.5*w,           +0.5*sy);
+         vertices[4]=v3(wvg_xcen-0.5*w,  wvg_ycen +0.5*w);
+         vertices[5]=v3(        -0.5*sx, wvg_ycen +0.5*w);
+         double height=0.0;
+         vector3 axis=v3(0.0,0.0,1.0);
+         geometric_object objects[1];
+         objects[0] = make_prism( dielectric, vertices, 6, height, axis);
+         geometric_object_list g={ 1, objects };
+         meep_geom::set_materials_from_geometry(&the_structure, g);
+       }
+      else 
+       { 
+         geometric_object objects[2];
+         vector3 hcenter = v3(-0.5*pad, wvg_ycen), hsize = v3(sx-pad, w);
+         vector3 vcenter = v3(wvg_xcen, 0.5*pad),  vsize = v3(w, sy-pad);
+         objects[0] = make_block(dielectric, hcenter, e1, e2, e3, hsize);
+         objects[1] = make_block(dielectric, vcenter, e1, e2, e3, vsize);
+         geometric_object_list g={ 2, objects };
+         meep_geom::set_materials_from_geometry(&the_structure, g);
+       }
+    }
 
-      objects[1] = make_block(dielectric,
-                              v3(wvg_xcen, 0.5*pad),
-                              e1, e2, e3,
-                              v3(w, sy-pad, ENORMOUS)
-                             );
+  vsrc   =   volume( vec(-0.5*sx + dpml, wvg_ycen-0.5*w), vec(-0.5*sx + dpml, wvg_ycen+0.5*w) );
+  vrefl  =   volume( vec(-0.5*sx + 1.5,  wvg_ycen-w    ), vec(-0.5*sx+1.5,    wvg_ycen+w    ) );
+  vtrans = (
+   no_bend ? volume( vec(0.5*sx-1.5,     wvg_ycen-w),     vec(0.5*sx-1.5,     wvg_ycen+w    ) )
+           : volume( vec(wvg_xcen-w,     0.5*sy-1.5),     vec(wvg_xcen+w,     0.5*sy-1.5    ) )
+           );
 
-      geometric_object_list g={ 2, objects };
-      meep_geom::set_materials_from_geometry(&the_structure, g);
-    };
+  return the_structure;
+
+}
+
+/***************************************************************/
+/***************************************************************/
+/***************************************************************/
+void bend_flux(bool no_bend, char *GDSIIFile, bool use_prisms)
+{
+  vec v0;
+  volume vsrc(v0), vrefl(v0), vtrans(v0);
+  structure the_structure =
+   GDSIIFile ? create_structure_from_GDSII(GDSIIFile, no_bend, vsrc, vrefl, vtrans)
+             : create_structure_by_hand(no_bend, use_prisms, vsrc, vrefl, vtrans);
 
   fields f(&the_structure);
 
@@ -124,8 +209,7 @@ void bend_flux(bool no_bend)
   double fcen = 0.15;  // ; pulse center frequency
   double df   = 0.1;   // ; df
   gaussian_src_time src(fcen, df);
-  volume v( vec(1.0-0.5*sx, wvg_ycen), vec(0.0,w) );
-  f.add_volume_source(Ez, src, v);
+  f.add_volume_source(Ez, src, vsrc);
 
   //(define trans ; transmitted flux
   //      (add-flux fcen df nfreq
@@ -138,20 +222,18 @@ void bend_flux(bool no_bend)
   double f_end   = fcen+0.5*df;
   int nfreq      = 100; //  number of frequencies at which to compute flux
 
-  volume *trans_volume=
-   no_bend ? new volume(vec(0.5*sx-1.5, wvg_ycen), vec(0.0, 2.0*w))
-           : new volume(vec(wvg_xcen, 0.5*sy-1.5), vec(2.0*w, 0.0));
-  volume_list trans_vl = volume_list(*trans_volume, Sz);
-  dft_flux trans=f.add_dft_flux(&trans_vl, f_start, f_end, nfreq);
+  direction trans_dir = no_bend ? X : Y;
+  dft_flux trans=f.add_dft_flux(trans_dir, vtrans, f_start, f_end, nfreq);
 
   //(define refl ; reflected flux
   //      (add-flux fcen df nfreq
   //		(make flux-region
   //		  (center (+ (* -0.5 sx) 1.5) wvg-ycen) (size 0 (* w 2)))))
   //
-  volume refl_volume( vec(-0.5*sx+1.5, wvg_ycen), vec(0.0,2.0*w));
-  volume_list refl_vl= volume_list(refl_volume, Sz);
-  dft_flux refl=f.add_dft_flux(&refl_vl, f_start, f_end, nfreq);
+  dft_flux refl=f.add_dft_flux(NO_DIRECTION, vrefl, f_start, f_end, nfreq);
+
+  char *prefix = const_cast<char *>(no_bend ? "straight" : "bent");
+  f.output_hdf5(Dielectric, f.total_volume(), 0, false, true, prefix);
 
   //; for normal run, load negated fields to subtract incident from refl. fields
   //(if (not no-bend?) (load-minus-flux "refl-flux" refl))
@@ -159,7 +241,7 @@ void bend_flux(bool no_bend)
   if (!no_bend)
    { refl.load_hdf5(f, dataname);
      refl.scale_dfts(-1.0);
-   };
+   }
 
   //(run-sources+
   // (stop-when-fields-decayed 50 Ez
@@ -168,11 +250,8 @@ void bend_flux(bool no_bend)
   //			       (vector3 wvg-xcen (- (/ sy 2) 1.5)))
   //			   1e-3)
   // (at-beginning output-epsilon))
-  char *prefix = const_cast<char *>(no_bend ? "straight" : "bent");
-  f.output_hdf5(Dielectric, f.total_volume(), 0, false, true, prefix);
-  vec eval_point = no_bend ? vec(0.5*sx-1.5, wvg_ycen)
-                           : vec(wvg_xcen, 0.5*sy - 1.5);
-  double DeltaT=50.0, NextCheckTime = f.round_time() + DeltaT;
+  vec eval_point = vtrans.center();
+  double DeltaT=10.0, NextCheckTime = f.round_time() + DeltaT;
   double Tol=1.0e-3;
   double max_abs=0.0, cur_max=0.0;
   bool Done=false;
@@ -189,7 +268,8 @@ void bend_flux(bool no_bend)
         if ( (max_abs>0.0) && cur_max < Tol*max_abs)
          Done=true;
         cur_max=0.0;
-      };
+      }
+
      //printf("%.2e %.2e %.2e %.2e\n",f.round_time(),absEz,max_abs,cur_max);
    } while(!Done);
 
@@ -199,7 +279,7 @@ void bend_flux(bool no_bend)
    refl.save_hdf5(f, dataname);
 
   //(display-fluxes trans refl)
-  printf("%11s | %12s | %12s\n", "   Time    ", " trans flux", "  refl flux");
+  printf("%11s | %12s | %12s\n", "   Freq    ", " trans flux", "  refl flux");
   double f0=fcen-0.5*df, fstep=df/(nfreq-1);
   double *trans_flux=trans.flux();
   double *refl_flux=refl.flux();
@@ -215,8 +295,20 @@ int main(int argc, char *argv[])
 {
   initialize mpi(argc, argv);
 
-  bend_flux(true);
-  bend_flux(false);
+  bool use_prisms=false;
+  char *GDSIIFile=0;
+  for(int narg=1; narg<argc; narg++)
+   if (!strcasecmp(argv[narg],"--use-prisms"))
+    use_prisms=true;
+  for(int narg=1; narg<argc-1; narg++)
+   if (!strcasecmp(argv[narg],"--GDSIIFile"))
+    GDSIIFile=argv[narg+1];
+
+  if ( GDSIIFile!=0 && use_prisms==true ) 
+   fprintf(stderr,"warning: --use-prisms is ignored if --GDSIIFile is specified\n");
+
+  bend_flux(true, GDSIIFile, use_prisms);
+  bend_flux(false, GDSIIFile, use_prisms);
 
   // success if we made it here
   return 0;

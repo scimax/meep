@@ -1,5 +1,6 @@
 import math
 import unittest
+import warnings
 import numpy as np
 import meep as mp
 import meep.geom as gm
@@ -244,6 +245,15 @@ class TestEllipsoid(unittest.TestCase):
         self.assertIn(zeros(), e)
 
 
+class TestPrism(unittest.TestCase):
+
+    def test_contains_point(self):
+        vertices = [gm.Vector3(-1, 1), gm.Vector3(1, 1), gm.Vector3(1, -1), gm.Vector3(-1, -1)]
+        p = gm.Prism(vertices, height=1)
+        self.assertIn(zeros(), p)
+        self.assertNotIn(gm.Vector3(2, 2), p)
+
+
 class TestMedium(unittest.TestCase):
 
     def test_D_conductivity(self):
@@ -281,6 +291,63 @@ class TestMedium(unittest.TestCase):
         self.assertEqual(m.H_chi3_diag.x, 2)
         self.assertEqual(m.H_chi3_diag.y, 2)
         self.assertEqual(m.H_chi3_diag.z, 2)
+
+    def test_check_material_frequencies(self):
+        mat = mp.Medium(valid_freq_range=mp.FreqRange(min=10, max=20))
+        invalid_sources = [
+            [mp.Source(mp.GaussianSource(5, fwidth=1), mp.Ez, mp.Vector3())],
+            [mp.Source(mp.ContinuousSource(10, fwidth=1), mp.Ez, mp.Vector3())],
+            [mp.Source(mp.GaussianSource(10, width=1), mp.Ez, mp.Vector3())],
+            [mp.Source(mp.GaussianSource(20, width=1), mp.Ez, mp.Vector3())],
+        ]
+
+        cell_size = mp.Vector3(5, 5)
+        resolution = 5
+
+        def check_warnings(sim, should_warn=True):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                sim.run(until=5)
+
+                if should_warn:
+                    self.assertEqual(len(w), 1)
+                    self.assertIn("material", str(w[-1].message))
+                else:
+                    self.assertEqual(len(w), 0)
+
+        geom = [mp.Sphere(0.2, material=mat)]
+
+        for s in invalid_sources:
+            # Check for invalid extra_materials
+            sim = mp.Simulation(cell_size=cell_size, resolution=resolution, sources=s, extra_materials=[mat])
+            check_warnings(sim)
+
+            # Check for invalid geometry materials
+            sim = mp.Simulation(cell_size=cell_size, resolution=resolution, sources=s, geometry=geom)
+            check_warnings(sim)
+
+        valid_sources = [
+            [mp.Source(mp.GaussianSource(15, fwidth=1), mp.Ez, mp.Vector3())],
+            [mp.Source(mp.ContinuousSource(15, width=5), mp.Ez, mp.Vector3())]
+        ]
+
+        for s in valid_sources:
+            sim = mp.Simulation(cell_size=cell_size, resolution=resolution, sources=s, extra_materials=[mat])
+            check_warnings(sim, False)
+
+        # Check DFT frequencies
+
+        # Invalid extra_materials
+        sim = mp.Simulation(cell_size=cell_size, resolution=resolution, sources=valid_sources[0],
+                            extra_materials=[mat])
+        fregion = mp.FluxRegion(center=mp.Vector3(0, 1), size=mp.Vector3(2, 2), direction=mp.X)
+        sim.add_flux(15, 6, 2, fregion)
+        check_warnings(sim)
+
+        # Invalid geometry material
+        sim = mp.Simulation(cell_size=cell_size, resolution=resolution, sources=valid_sources[0], geometry=geom)
+        sim.add_flux(15, 6, 2, fregion)
+        check_warnings(sim)
 
 
 class TestVector3(unittest.TestCase):
@@ -330,6 +397,20 @@ class TestVector3(unittest.TestCase):
         self.assertEqual(mp.Vector3(2, 2, 2) * 0.5, mp.Vector3(1, 1, 1))
         self.assertEqual(mp.Vector3(1, 1, 1) * mp.Vector3(1, 1, 1), 3)
         self.assertEqual(0.5 * mp.Vector3(2, 2, 2), mp.Vector3(1, 1, 1))
+
+    def test_rotate_lattice(self):
+        axis = mp.Vector3(1)
+        v = mp.Vector3(2, 2, 2)
+        lattice = mp.Lattice(size=mp.Vector3(1, 1))
+        res = v.rotate_lattice(axis, 3, lattice)
+        self.assertTrue(res.close(mp.Vector3(2.0, -2.262225009320625, -1.6977449770811563)))
+
+    def test_rotate_reciprocal(self):
+        axis = mp.Vector3(1)
+        v = mp.Vector3(2, 2, 2)
+        lattice = mp.Lattice(size=mp.Vector3(1, 1))
+        res = v.rotate_reciprocal(axis, 3, lattice)
+        self.assertTrue(res.close(mp.Vector3(2.0, -2.262225009320625, -1.6977449770811563)))
 
 
 class TestLattice(unittest.TestCase):

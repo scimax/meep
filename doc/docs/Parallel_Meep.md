@@ -2,12 +2,12 @@
 # Parallel Meep
 ---
 
-Meep supports distributed-memory parallelism using [MPI](https://en.wikipedia.org/wiki/MPI). This allows it to scale up from small dual-processor machines to supercomputers, and to work on very large problems that may not fit into the memory of one machine. We've run Meep simulations using hundreds of processors. Of course, your problem must be sufficiently large in order to [benefit from many processors](FAQ/#should-i-expect-linear-speedup-from-the-parallel-meep).
+Meep supports distributed-memory parallelism using [MPI](https://en.wikipedia.org/wiki/MPI). This allows it to scale up from small dual-processor machines to supercomputers, and to work on very large problems that may not fit into the memory of one machine. Meep simulations can use hundreds of processors. Of course, your problem must be sufficiently large in order to [benefit from many processors](FAQ/#should-i-expect-linear-speedup-from-the-parallel-meep).
 
 Installing Parallel Meep
 ------------------------
 
-To install the parallel version of Meep, you must have a version of MPI installed on your system. See [Installation](Installation.md#mpi-parallel-machines).
+To install the parallel version of Meep, you must have a version of MPI installed on your system. See [Installation](Installation/#mpi).
 
 We also strongly recommend installing the [HDF5 package](Installation/#hdf5) with parallel I/O support if you are going to run with more than a few processors. HDF5 needs to be configured with the flag `--enable-parallel`. You may also have to set the `CC` environment variable to `mpicc`. Unfortunately, the parallel HDF5 library then does not work with serial code, so you have may have to choose to install either the serial or the parallel Meep, but not both.
 
@@ -18,7 +18,7 @@ Then you just configure Meep with the flag `--with-mpi`. If you run the resultin
 Using Parallel Meep
 -------------------
 
-The parallel version of Meep is designed to operate completely transparently: you use the same Python/Scheme file as for the serial version, and the output is the same but it is just faster.
+The parallel version of Meep is designed to operate completely transparently: you use the same Python/Scheme file as for the serial version, and the output is the same but it is just faster. In Python, the output of each process that is not the master (rank 0) is sent to `devnull`, and in Scheme, the special `print` function only prints output from the master process.
 
 In order to run MPI programs, you typically have to use a command like `mpirun` with an argument to say how many processes you want to use. Consult your MPI documentation. For example, with many popular MPI implementations, to run with 4 processes you would use something like:
 
@@ -55,16 +55,23 @@ Computations that only involve isolated points, such as `get_field_point` (Pytho
 
 Although all processes execute the Python/Scheme file in parallel, print statements are ignored for all process but one (process \#0). In this way, you only get one copy of the output.
 
-If for some reason you need to distinguish different MPI processes in your Scheme file, you can use the following two functions:
+If for some reason you need to distinguish different MPI processes in your Python/Scheme file, you can use the following two functions:
 
-**`(meep-count-processors)`**  
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+**`(meep-count-processors)`**
+**`meep.count_processors()`**
+—
 Returns the number of processes that Meep is using in parallel.
 
-**`(meep-my-rank)`**  
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-Returns the index of the process running the current `.ctl` file, from zero to `(meep-count-processors)`–1.
+**`(meep-my-rank)`**
+**`meep.my_rank()`**
+—
+Returns the index of the process running the current file, from zero to (meep-count-processors)–1.
 
-**Warning**: do not attempt to perform different Meep commands in different processes by using the `(meep-my-rank)`. All processes must for the most part execute the same Meep commands in the same sequence or they will deadlock, waiting forever for one another.
+**`(meep-all-wait)`**
+**`meep.all_wait()`**
+—
+Blocks until all processes execute this statment (MPI_Barrier).
+
+**Warning**: do not attempt to perform different Meep commands in different processes by using the `(meep-my-rank)` or `meep.my_rank()`. All processes must for the most part execute the same Meep commands in the same sequence or they will deadlock, waiting forever for one another.
 
 For large multicore jobs with I/O, it may be necessary to have `(meep-all-wait)` as the last line in the Scheme file to ensure that all processors terminate at the same point in the execution. Otherwise, one processor may finish and abruptly terminate the other processors.

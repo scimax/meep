@@ -15,9 +15,12 @@ namespace py_mpb {
 void map_data(mpb_real *d_in_re, int size_in_re, mpb_real *d_in_im, int size_in_im,
               int n_in[3], mpb_real *d_out_re, int size_out_re, mpb_real *d_out_im,
               int size_out_im, int n_out[3], matrix3x3 coord_map, mpb_real *kvector,
-              bool pick_nearest, bool verbose);
+              bool pick_nearest, bool verbose, bool multiply_bloch_phase);
 
 bool with_hermitian_epsilon();
+
+typedef mpb_real (*field_integral_energy_func)(mpb_real, mpb_real, vector3, void*);
+typedef cnumber (*field_integral_func)(cvector3, mpb_real, vector3, void*);
 
 struct mode_solver {
   static const int MAX_NWORK = 10;
@@ -36,6 +39,8 @@ struct mode_solver {
   std::string epsilon_input_file;
   std::string mu_input_file;
   bool force_mu;
+  bool use_simple_preconditioner;
+  vector3 grid_size;
 
   int n[3];
   int local_N;
@@ -43,7 +48,6 @@ struct mode_solver {
   int alloc_N;
   int nwork_alloc;
 
-  // TODO: Get from python ?
   int eigensolver_nwork;
   int eigensolver_block_size;
 
@@ -88,7 +92,8 @@ struct mode_solver {
               int mesh_size, meep_geom::material_data *_default_material, geometric_object_list geom,
               bool reset_fields, bool deterministic, double target_freq, int dims, bool verbose,
               bool periodicity, double flops, bool negative_epsilon_ok, std::string epsilon_input_file,
-              std::string mu_input_file, bool force_mu);
+              std::string mu_input_file, bool force_mu, bool use_simple_preconditioner, vector3 grid_size,
+              int eigensolver_nwork, int eigensolver_block_size);
   ~mode_solver();
 
   void init(int p, bool reset_fields);
@@ -157,7 +162,7 @@ struct mode_solver {
   cvector3 get_field_point(vector3 p);
   cvector3 get_bloch_field_point(vector3 p);
 
-  void multiply_bloch_phase();
+  void multiply_bloch_phase(std::complex<double> *cdata=NULL);
   void fix_field_phase();
   void compute_field_divergence();
   std::vector<mpb_real> compute_zparities();
@@ -167,6 +172,13 @@ struct mode_solver {
   vector3 compute_1_group_velocity(int b);
   vector3 compute_1_group_velocity_reciprocal(int b);
   mpb_real compute_energy_in_dielectric(mpb_real eps_low, mpb_real eps_high);
+
+  cnumber compute_field_integral(field_integral_func field_func,
+                                 field_integral_energy_func energy_func,
+                                 void *py_func);
+  number compute_energy_integral(field_integral_func field_func,
+                                 field_integral_energy_func energy_func,
+                                 void *py_func);
 
 private:
   int kpoint_index;

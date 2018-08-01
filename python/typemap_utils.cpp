@@ -24,8 +24,8 @@
     #define PyInteger_AsLong(n) PyLong_AsLong(n)
     #define PyInteger_FromLong(n) PyLong_FromLong(n)
 #else
-    #define PyObject_ToCharPtr(n) PyString_AsString(n)
-    #define IsPyString(n) PyString_Check(n)
+    #define PyObject_ToCharPtr(n) py2_string_as_utf8(n)
+    #define IsPyString(n) PyString_Check(n) || PyUnicode_Check(n)
     #define PyInteger_Check(n) PyInt_Check(n)
     #define PyInteger_AsLong(n) PyInt_AsLong(n)
     #define PyInteger_FromLong(n) PyInt_FromLong(n)
@@ -35,20 +35,56 @@ PyObject *py_callback = NULL;
 PyObject *py_callback_v3 = NULL;
 PyObject *py_amp_func = NULL;
 
+extern "C" {
+    vector3 prism_coordinate_p2c(prism *prsm, vector3 vp);
+}
 static int pymedium_to_medium(PyObject *po, medium_struct *m);
 static int pymaterial_to_material(PyObject *po, material_type *mt);
+
+#if PY_MAJOR_VERSION == 2
+static char *py2_string_as_utf8(PyObject *po) {
+    if (PyString_Check(po)) {
+        return PyString_AsString(po);
+    }
+    else if (PyUnicode_Check(po)) {
+        PyObject *s = PyUnicode_AsUTF8String(po);
+        char *result = PyString_AsString(s);
+        Py_DECREF(s);
+        return result;
+    }
+    else {
+        return NULL;
+    }
+}
+#endif
+
+static PyObject *get_geom_mod() {
+    static PyObject *geom_mod = NULL;
+    if (geom_mod == NULL) {
+        geom_mod = PyImport_ImportModule("meep.geom");
+    }
+    return geom_mod;
+}
 
 static PyObject *py_material_object() {
     static PyObject *material_object = NULL;
     if (material_object == NULL) {
-        PyObject *geom_mod = PyImport_ImportModule("meep.geom");
+        PyObject *geom_mod = get_geom_mod();
         material_object = PyObject_GetAttrString(geom_mod, "Medium");
-        Py_XDECREF(geom_mod);
     }
     return material_object;
 }
 
-static PyObject* vec2py(const meep::vec &v) {
+static PyObject *py_vector3_object() {
+    static PyObject *vector3_object = NULL;
+    if (vector3_object == NULL) {
+        PyObject *geom_mod = get_geom_mod();
+        vector3_object = PyObject_GetAttrString(geom_mod, "Vector3");
+    }
+    return vector3_object;
+}
+
+static PyObject* vec2py(const meep::vec &v, bool newobj=false) {
 
     double x = 0, y = 0, z = 0;
 
@@ -71,30 +107,38 @@ static PyObject* vec2py(const meep::vec &v) {
         break;
     }
 
-    if (py_callback_v3 == NULL) {
-        PyObject *geom_mod = PyImport_ImportModule("meep.geom");
-        PyObject *v3_class = PyObject_GetAttrString(geom_mod, "Vector3");
-        PyObject *args = PyTuple_New(0);
-        py_callback_v3 = PyObject_Call(v3_class, args, NULL);
+    if (newobj) {
+        PyObject *v3_class = py_vector3_object();
+        PyObject *args = Py_BuildValue("(d,d,d)", x, y, z);
+        PyObject *res = PyObject_Call(v3_class, args, NULL);
 
         Py_DECREF(args);
-        Py_DECREF(geom_mod);
-        Py_DECREF(v3_class);
+
+        return res;
     }
+    else {
+        if (py_callback_v3 == NULL) {
+            PyObject *v3_class = py_vector3_object();
+            PyObject *args = PyTuple_New(0);
+            py_callback_v3 = PyObject_Call(v3_class, args, NULL);
 
-    PyObject *pyx = PyFloat_FromDouble(x);
-    PyObject *pyy = PyFloat_FromDouble(y);
-    PyObject *pyz = PyFloat_FromDouble(z);
+            Py_DECREF(args);
+        }
 
-    PyObject_SetAttrString(py_callback_v3, "x", pyx);
-    PyObject_SetAttrString(py_callback_v3, "y", pyy);
-    PyObject_SetAttrString(py_callback_v3, "z", pyz);
+        PyObject *pyx = PyFloat_FromDouble(x);
+        PyObject *pyy = PyFloat_FromDouble(y);
+        PyObject *pyz = PyFloat_FromDouble(z);
 
-    Py_DECREF(pyx);
-    Py_DECREF(pyy);
-    Py_DECREF(pyz);
+        PyObject_SetAttrString(py_callback_v3, "x", pyx);
+        PyObject_SetAttrString(py_callback_v3, "y", pyy);
+        PyObject_SetAttrString(py_callback_v3, "z", pyz);
 
-    return py_callback_v3;
+        Py_DECREF(pyx);
+        Py_DECREF(pyy);
+        Py_DECREF(pyz);
+
+        return py_callback_v3;
+    }
 }
 
 static void py_user_material_func_wrap(vector3 x, void *user_data, medium_struct *medium) {
@@ -198,6 +242,16 @@ static int pyv3_to_cv3(PyObject *po, cvector3 *v) {
     v->z.im = z.imag();
 
     return 1;
+}
+
+static PyObject* v3_to_pyv3(vector3 *v) {
+    PyObject *v3_class = py_vector3_object();
+    PyObject *args = Py_BuildValue("(ddd)", v->x, v->y, v->z);
+    PyObject *py_v = PyObject_Call(v3_class, args, NULL);
+
+    Py_DECREF(args);
+
+    return py_v;
 }
 
 static int get_attr_v3(PyObject *py_obj, vector3 *v, const char *name) {
@@ -351,6 +405,116 @@ static int pymaterial_to_material(PyObject *po, material_type *mt) {
     *mt = md;
 
     return 1;
+}
+
+template<class T>
+static void set_v3_on_pyobj(PyObject *py_obj, T *v3, const char *attr) {
+    PyObject *v3_class = py_vector3_object();
+    PyObject *v3_args = Py_BuildValue("(d,d,d)", v3->x, v3->y, v3->z);
+    PyObject *pyv3 = PyObject_Call(v3_class, v3_args, NULL);
+    PyObject_SetAttrString(py_obj, attr, pyv3);
+
+    Py_DECREF(v3_args);
+    Py_DECREF(pyv3);
+}
+
+static PyObject *susceptibility_to_py_obj(susceptibility_struct *s) {
+    PyObject *geom_mod = get_geom_mod();
+
+    PyObject *res;
+    PyObject *args = PyTuple_New(0);
+
+    if (s->noise_amp == 0) {
+        if (s->drude) {
+            PyObject *py_drude_class = PyObject_GetAttrString(geom_mod, "DrudeSusceptibility");
+            res = PyObject_Call(py_drude_class, args, NULL);
+            Py_DECREF(py_drude_class);
+        }
+        else {
+            PyObject *py_lorentz_class = PyObject_GetAttrString(geom_mod, "LorentzianSusceptibility");
+            res = PyObject_Call(py_lorentz_class, args, NULL);
+            Py_DECREF(py_lorentz_class);
+        }
+    }
+    else {
+        if (s->drude) {
+            PyObject *py_noisy_drude_class = PyObject_GetAttrString(geom_mod, "NoisyDrudeSusceptibility");
+            res = PyObject_Call(py_noisy_drude_class, args, NULL);
+            Py_DECREF(py_noisy_drude_class);
+        }
+        else {
+            PyObject *py_noisy_lorentz_class = PyObject_GetAttrString(geom_mod, "NoisyLorentzianSusceptibility");
+            res = PyObject_Call(py_noisy_lorentz_class, args, NULL);
+            Py_DECREF(py_noisy_lorentz_class);
+        }
+        PyObject *py_noise = PyFloat_FromDouble(s->noise_amp);
+        PyObject_SetAttrString(res, "noise_amp", py_noise);
+        Py_DECREF(py_noise);
+    }
+
+    set_v3_on_pyobj<vector3>(res, &s->sigma_diag, "sigma_diag");
+    set_v3_on_pyobj<vector3>(res, &s->sigma_offdiag, "sigma_offdiag");
+
+    PyObject *py_freq = PyFloat_FromDouble(s->frequency);
+    PyObject *py_gamma = PyFloat_FromDouble(s->gamma);
+
+    PyObject_SetAttrString(res, "frequency", py_freq);
+    PyObject_SetAttrString(res, "gamma", py_gamma);
+
+    Py_DECREF(args);
+    Py_DECREF(py_freq);
+    Py_DECREF(py_gamma);
+
+    return res;
+}
+
+static PyObject *susceptibility_list_to_py_list(susceptibility_list *sl) {
+    PyObject *res = PyList_New(sl->num_items);
+
+    for (Py_ssize_t i = 0; i < sl->num_items; ++i) {
+        PyList_SetItem(res, i, susceptibility_to_py_obj(&sl->items[i]));
+    }
+
+    return res;
+}
+
+static PyObject *material_to_py_material(material_type mat) {
+    switch (mat->which_subclass) {
+    case meep_geom::material_data::MEDIUM: {
+        PyObject *geom_mod = get_geom_mod();
+        PyObject *medium_class = PyObject_GetAttrString(geom_mod, "Medium");
+
+        PyObject *medium_args = PyTuple_New(0);
+        PyObject *py_mat = PyObject_Call(medium_class, medium_args, NULL);
+
+        PyObject *py_E_sus = susceptibility_list_to_py_list(&mat->medium.E_susceptibilities);
+        PyObject *py_H_sus = susceptibility_list_to_py_list(&mat->medium.H_susceptibilities);
+        PyObject_SetAttrString(py_mat, "E_susceptibilities", py_E_sus);
+        PyObject_SetAttrString(py_mat, "H_susceptibilities", py_H_sus);
+
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.epsilon_diag, "epsilon_diag");
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.mu_diag, "mu_diag");
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.E_chi2_diag, "E_chi2_diag");
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.E_chi3_diag, "E_chi3_diag");
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.H_chi2_diag, "H_chi2_diag");
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.H_chi3_diag, "H_chi3_diag");
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.D_conductivity_diag, "D_conductivity_diag");
+        set_v3_on_pyobj<vector3>(py_mat, &mat->medium.B_conductivity_diag, "B_conductivity_diag");
+        set_v3_on_pyobj<cvector3>(py_mat, &mat->medium.epsilon_offdiag, "epsilon_offdiag");
+        set_v3_on_pyobj<cvector3>(py_mat, &mat->medium.mu_offdiag, "mu_offdiag");
+
+        Py_DECREF(medium_args);
+        Py_DECREF(medium_class);
+        Py_DECREF(py_E_sus);
+        Py_DECREF(py_H_sus);
+
+        return py_mat;
+    }
+    default:
+        // Only Medium is supported at this time.
+        PyErr_SetString(PyExc_NotImplementedError, "Can only convert C++ medium_struct to Python");
+        return NULL;
+    }
 }
 
 static int pymedium_to_medium(PyObject *po, medium_struct *m) {
@@ -524,6 +688,49 @@ static int pyellipsoid_to_ellipsoid(PyObject *py_ell, geometric_object *e) {
     return 1;
 }
 
+static int pyprism_to_prism(PyObject *py_prism, geometric_object *p) {
+    material_type material;
+    double height;
+    vector3 axis;
+
+    if (!get_attr_material(py_prism, &material) ||
+        !get_attr_dbl(py_prism, &height, "height") ||
+        !get_attr_v3(py_prism, &axis, "axis")) {
+
+        return 0;
+    }
+
+    PyObject *py_vert_list = PyObject_GetAttrString(py_prism, "vertices");
+
+    if (!py_vert_list) {
+        PyErr_PrintEx(0);
+        return 0;
+    }
+
+    if (!PyList_Check(py_vert_list)) {
+        PyErr_SetString(PyExc_TypeError, "Expected Prism.vertices to be a list\n");
+        return 0;
+    }
+
+    int num_vertices = PyList_Size(py_vert_list);
+    vector3 *vertices = new vector3[num_vertices];
+
+    for (Py_ssize_t i = 0; i < num_vertices; ++i) {
+        vector3 v3;
+        if (!pyv3_to_v3(PyList_GetItem(py_vert_list, i), &v3)) {
+            return 0;
+        }
+        vertices[i] = v3;
+    }
+
+    *p = make_prism(material, vertices, num_vertices, height, axis);
+
+    delete [] vertices;
+    Py_DECREF(py_vert_list);
+
+    return 1;
+}
+
 static int py_gobj_to_gobj(PyObject *po, geometric_object *o) {
     int success = 0;
     std::string go_type = py_class_name_as_string(po);
@@ -545,6 +752,9 @@ static int py_gobj_to_gobj(PyObject *po, geometric_object *o) {
     }
     else if (go_type == "Ellipsoid") {
         success = pyellipsoid_to_ellipsoid(po, o);
+    }
+    else if (go_type == "Prism") {
+        success = pyprism_to_prism(po, o);
     }
     else {
         PyErr_Format(PyExc_TypeError, "Error: %s is not a valid GeometricObject type\n", go_type.c_str());
@@ -575,4 +785,66 @@ static int py_list_to_gobj_list(PyObject *po, geometric_object_list *l) {
     }
 
     return 1;
+}
+
+static PyObject *gobj_to_py_obj(geometric_object *gobj) {
+    switch (gobj->which_subclass) {
+    case geometric_object::PRISM: {
+        PyObject *geom_mod = get_geom_mod();
+        PyObject *prism_class = PyObject_GetAttrString(geom_mod, "Prism");
+
+        int num_verts = gobj->subclass.prism_data->vertices.num_items;
+        prism *prsm = gobj->subclass.prism_data;
+
+        PyObject *py_verts = PyList_New(num_verts);
+        for (int i = 0; i < num_verts; ++i) {
+            vector3 vp = prsm->vertices.items[i];
+            vector3 cart_v3 = prism_coordinate_p2c(prsm, vp);
+            PyList_SetItem(py_verts, i, v3_to_pyv3(&cart_v3));
+        }
+
+        double height = gobj->subclass.prism_data->height;
+        vector3 axis = gobj->subclass.prism_data->m_p2c.c2;
+        PyObject *py_axis = v3_to_pyv3(&axis);
+
+        PyObject *py_center = v3_to_pyv3(&gobj->center);
+        PyObject *py_mat = material_to_py_material((meep_geom::material_type)gobj->material);
+
+        PyObject *args = Py_BuildValue("(OdO)", py_verts, height, py_axis);
+        PyObject *kwargs = Py_BuildValue("{s:O,s:O}", "center", py_center, "material", py_mat);
+        PyObject *res = PyObject_Call(prism_class, args, kwargs);
+
+        Py_DECREF(prism_class);
+        Py_DECREF(args);
+        Py_DECREF(kwargs);
+        Py_DECREF(py_verts);
+        Py_DECREF(py_axis);
+        Py_DECREF(py_center);
+        Py_DECREF(py_mat);
+
+        return res;
+    }
+    case geometric_object::BLOCK:
+    case geometric_object::SPHERE:
+    case geometric_object::CYLINDER:
+    default:
+        // We currently only have the need to create python Prisms from C++.
+        // Other geometry can be added as needed.
+        PyErr_SetString(PyExc_RuntimeError, "Conversion of non-prism geometric_object to Python is not supported");
+        return NULL;
+    }
+}
+
+static PyObject* gobj_list_to_py_list(geometric_object_list *objs) {
+
+    PyObject *py_res = PyList_New(objs->num_items);
+
+    for (int i = 0; i < objs->num_items; ++i) {
+        PyList_SetItem(py_res, i, gobj_to_py_obj(&objs->items[i]));
+        geometric_object_destroy(objs->items[i]);
+    }
+
+    free(objs->items);
+
+    return py_res;
 }

@@ -14,6 +14,7 @@ from scipy.optimize import minimize_scalar
 from scipy.optimize import ridder
 import meep as mp
 from meep import mpb
+from utils import compare_arrays
 
 
 class TestModeSolver(unittest.TestCase):
@@ -34,10 +35,8 @@ class TestModeSolver(unittest.TestCase):
         print('=' * 24)
 
         def rm_h5():
-            mp.all_wait()
-            if mp.am_master():
-                for f in glob.glob("{}*.h5".format(self.filename_prefix)):
-                    os.remove(f)
+            for f in glob.glob("{}*.h5".format(self.filename_prefix)):
+                os.remove(f)
 
         self.addCleanup(rm_h5)
 
@@ -180,30 +179,16 @@ class TestModeSolver(unittest.TestCase):
             ref_arr[1::3] = ref_y.ravel()
             ref_arr[2::3] = ref_z.ravel()
 
-            self.compare_arrays(ref_arr, field)
-
-    def compare_arrays(self, exp, res, tol=1e-3):
-        exp_1d = exp.ravel()
-        res_1d = res.ravel()
-
-        norm_exp = np.linalg.norm(exp_1d)
-        norm_res = np.linalg.norm(res_1d)
-
-        if norm_exp == 0:
-            self.assertEqual(norm_res, 0)
-        else:
-            diff = np.linalg.norm(res_1d - exp_1d) / norm_exp
-            self.assertLess(diff, tol)
+            compare_arrays(self, ref_arr, field)
 
     def compare_h5_files(self, ref_path, res_path, tol=1e-3):
-        mp.all_wait()
         with h5py.File(ref_path) as ref:
             with h5py.File(res_path, 'r') as res:
                 for k in ref.keys():
                     if k == 'description':
                         self.assertEqual(ref[k].value, res[k].value)
                     else:
-                        self.compare_arrays(ref[k].value, res[k].value, tol=tol)
+                        compare_arrays(self, ref[k].value, res[k].value, tol=tol)
 
     def test_update_band_range_data(self):
         brd = []
@@ -362,6 +347,7 @@ class TestModeSolver(unittest.TestCase):
 
         ms = self.init_solver()
         ms.run_te()
+        ms.output_epsilon()
 
         res_path = self.filename_prefix + '-epsilon.h5'
         self.compare_h5_files(data_path, res_path)
@@ -410,7 +396,7 @@ class TestModeSolver(unittest.TestCase):
 
         expected_energy_in_dielectric = 0.6990769686037558
 
-        self.compare_arrays(np.array(expected_energy), np.array(energy))
+        compare_arrays(self, np.array(expected_energy), np.array(energy))
         self.assertAlmostEqual(expected_energy_in_dielectric, energy_in_dielectric, places=3)
 
     def test_compute_group_velocity(self):
@@ -657,9 +643,13 @@ class TestModeSolver(unittest.TestCase):
         ms.deterministic = True
         ms.filename_prefix = self.filename_prefix
         ms.tolerance = 1e-12
+        dpwr = []
+
+        def get_dpwr(ms, band):
+            dpwr.append(ms.get_dpwr(band))
 
         ms.run(mpb.output_at_kpoint(mp.Vector3(0, 0.625, 0.375), mpb.fix_dfield_phase,
-                                    mpb.output_dpwr))
+                                    mpb.output_dpwr, get_dpwr))
 
         expected_brd = [
             ((0.0, mp.Vector3(0.0, 0.0, 0.0)),
@@ -682,6 +672,17 @@ class TestModeSolver(unittest.TestCase):
         ref_path = os.path.join(self.data_dir, ref_fn)
         res_path = re.sub('diamond', self.filename_prefix, ref_fn)
         self.compare_h5_files(ref_path, res_path)
+
+        # Test MPBData.convert()
+        md = mpb.MPBData(rectify=True, periods=2, resolution=32)
+        converted_dpwr = [md.convert(d) for d in dpwr]
+
+        ref_fn = 'converted-diamond-dpwr.k06.b05.h5'
+        ref_path = os.path.join(self.data_dir, ref_fn)
+        with h5py.File(ref_path, 'r') as f:
+            expected = f['data-new'].value
+
+        compare_arrays(self, expected, converted_dpwr[-1])
 
     def test_hole_slab(self):
         from mpb_hole_slab import ms
@@ -844,10 +845,10 @@ class TestModeSolver(unittest.TestCase):
                           mpb.display_yparities, mpb.display_group_velocities)
 
         expected_kvals = [
-            1.066321795284513,
-            1.0186792189943261,
-            0.8398943502679427,
-            0.7990426389486213
+            1.03584503595498,
+            0.9776221778906993,
+            0.8358057689930384,
+            0.788801145849691
         ]
 
         for e, r in zip(expected_kvals, kvals):
@@ -935,7 +936,7 @@ class TestModeSolver(unittest.TestCase):
             efield = np.vectorize(complex)(efield_re, efield_im)
 
         # rectangularize
-        md = mpb.MPBData(ms.get_lattice(), rectify=True, resolution=32, periods=3, verbose=True)
+        md = mpb.MPBData(lattice=ms.get_lattice(), rectify=True, resolution=32, periods=3, verbose=True)
         new_efield = md.convert(efield, ms.k_points[10])
         # check with ref file
 
@@ -946,7 +947,7 @@ class TestModeSolver(unittest.TestCase):
             expected_re = f['z.r-new'].value
             expected_im = f['z.i-new'].value
             expected = np.vectorize(complex)(expected_re, expected_im)
-            self.compare_arrays(expected, new_efield)
+            compare_arrays(self, expected, new_efield)
 
         ms.run_te()
 
@@ -973,18 +974,19 @@ class TestModeSolver(unittest.TestCase):
 
         # Test MPBData
         eps = ms.get_epsilon()
-        md = mpb.MPBData(ms.get_lattice(), rectify=True, resolution=32, periods=3, verbose=True)
+        md = mpb.MPBData(rectify=True, resolution=32, periods=3, verbose=True)
         new_eps = md.convert(eps)
         ref_fn = 'tri-rods-epsilon-r-m3-n32.h5'
         ref_path = os.path.join(self.data_dir, ref_fn)
 
         with h5py.File(ref_path, 'r') as f:
             ref = f['data-new'].value
-            self.compare_arrays(ref, new_eps, tol=1e-3)
+            compare_arrays(self, ref, new_eps, tol=1e-3)
 
     def test_subpixel_averaging(self):
         ms = self.init_solver()
         ms.run_te()
+        ms.output_epsilon()
 
         expected_brd = [
             ((0.0, mp.Vector3(0.0, 0.0, 0.0)),
@@ -1043,7 +1045,18 @@ class TestModeSolver(unittest.TestCase):
         ]
 
         ms.run_te()
+        ms.output_mu()
         self.check_band_range_data(expected_brd, ms.band_range_data)
+
+        fname = 'tutorial-mu.h5'
+        data_path = os.path.join(self.data_dir, fname)
+        res_path = re.sub('tutorial', self.filename_prefix, fname)
+        self.compare_h5_files(data_path, res_path)
+
+        mu = ms.get_mu()
+        with h5py.File(data_path, 'r') as f:
+            data = f['data'].value
+            compare_arrays(self, data, mu)
 
     def test_output_tot_pwr(self):
         ms = self.init_solver()
@@ -1055,6 +1068,13 @@ class TestModeSolver(unittest.TestCase):
         res_path = re.sub('tutorial', self.filename_prefix, ref_fname)
 
         self.compare_h5_files(ref_path, res_path)
+
+        # Test get_tot_pwr
+        arr = ms.get_tot_pwr(8)
+        with h5py.File(ref_path, 'r') as f:
+            expected = f['data'].value
+
+        compare_arrays(self, expected, arr)
 
     def test_get_eigenvectors(self):
         ms = self.init_solver()
@@ -1116,14 +1136,13 @@ class TestModeSolver(unittest.TestCase):
         efields = []
 
         def get_efields(ms, band):
-            efields.append(ms.get_efield(8, output=True))
+            efields.append(ms.get_efield(8))
 
         k = mp.Vector3(1 / -3, 1 / 3)
         ms.run_tm(mpb.output_at_kpoint(k, mpb.fix_efield_phase, get_efields))
 
-        lat = ms.get_lattice()
-        md = mpb.MPBData(lat, rectify=True, periods=3, resolution=32, verbose=True)
-        result = md.convert(efields[-1], ms.k_points[10])
+        md = mpb.MPBData(rectify=True, periods=3, resolution=32, verbose=True)
+        result = md.convert(efields[-1])
 
         ref_fn = 'converted-tri-rods-e.k11.b08.tm.h5'
         ref_path = os.path.join(self.data_dir, ref_fn)
@@ -1168,7 +1187,7 @@ class TestModeSolver(unittest.TestCase):
         ]
 
         self.check_band_range_data(expected_brd, ms.band_range_data)
-        self.compare_arrays(expected_freqs, ms.all_freqs[-1])
+        compare_arrays(self, expected_freqs, ms.all_freqs[-1])
 
         self.check_gap_list(expected_gap_list, ms.gap_list)
 
@@ -1223,42 +1242,126 @@ class TestModeSolver(unittest.TestCase):
         ]
 
         expected_freqs = [
-            (0.0, 0.2652450752888948, 0.36211931924886037, 0.3621209970866579,
-             0.5052984215604861, 0.5076357969986622, 0.5339446396841523, 0.6471305539348171,
-             0.64718320186009, 0.6571600477142543),
-            (0.12326602984561506, 0.27771339530892053, 0.3621959012731131, 0.36302565951244253,
-             0.505387092405693, 0.5076195849020112, 0.5322316893298896, 0.6470796178474362,
-             0.647223221628587, 0.654828206364591),
-            (0.1943638388282225, 0.33137494705193943, 0.3623389900641213, 0.37550977433277527,
-             0.5054646014393102, 0.5075913386897623, 0.5205986685505688, 0.6412030761801905,
-             0.6471864573522761, 0.6473418100828358),
-            (0.20839485247782383, 0.3504460140954443, 0.3624169907450078, 0.44431780234615237,
-             0.4776254910634774, 0.5057427518243194, 0.5075800427433821, 0.6158600411915314,
-             0.647002575504946, 0.6474104093525016),
-            (0.2102544365791045, 0.35331213233768893, 0.3612597560359688, 0.45411907757436154,
-             0.5002241723073143, 0.5058251418661104, 0.5083203737653703, 0.6162003560297682,
-             0.647044345633276, 0.6473905401985292),
-            (0.21363558887664455, 0.3572681960432815, 0.3594435751607656, 0.47402103865478207,
-             0.5059401251635635, 0.5072182933392233, 0.5640174836064029, 0.6158978436810754,
-             0.647079534025694, 0.6473213496606646),
-            (0.2151912435586334, 0.358668029449057, 0.3586787257531444, 0.4841939607451779,
-             0.5060858864792117, 0.5072753097601064, 0.615065597358213, 0.6150871735511474,
-             0.6470586621215278, 0.6472657348303715),
-            (0.2104321015504009, 0.3552493202332755, 0.359768447238033, 0.43918040591847685,
-             0.5057723660215659, 0.5073426514067818, 0.541478117963846, 0.6308592295716045,
-             0.6471525585808731, 0.6473326177488542),
-            (0.16216053877476436, 0.2952804946342481, 0.36144739185221775, 0.36540213680816513,
-             0.5054838640368768, 0.5075880729152275, 0.5318237561722323, 0.6470214642130181,
-             0.6471660484741889, 0.6514980509005492),
-            (0.0, 0.2652450753607585, 0.36211931929038943, 0.3621209970933658,
-             0.5052984215620827, 0.5076357970004499, 0.5339446396882321, 0.647130554181123,
-             0.6471832006793388, 0.6571643599704929)
+            (0.0, 0.2658849785488965, 0.35685238626885807, 0.3689901366690736, 0.5038968919475888,
+             0.5065518587501845, 0.5399110558762593, 0.6356807845993113, 0.6458520209139631, 0.6600163331973673),
+            (0.1233059084828522, 0.2782923927646106, 0.3573659215347579, 0.36946091907607376,
+             0.5037974922871195, 0.5066416041828202, 0.538216765672376, 0.6355701950896693, 0.6455953849366743,
+             0.6594309541221774),
+            (0.1946550854369502, 0.3314575373594674, 0.3616788807546181, 0.3779471264000764,
+             0.5026931348465893, 0.5067552606455699, 0.5272272884443048, 0.6333347872001693,
+             0.6442148265479308, 0.6532866817588999),
+            (0.20879926720698877, 0.34897792345617423, 0.3652783351764913, 0.443855894582484,
+             0.47790148240242897, 0.506844624322928, 0.5090758743980286, 0.6175265666609957,
+             0.6397097609325341, 0.6468898906944409),
+            (0.21067290783587236, 0.35110317640925215, 0.3649145592788066, 0.4533551114677223,
+             0.5005024186371949, 0.507017761099229, 0.5101250893240828, 0.6168213478492276,
+             0.6424780509991848, 0.6468935605826212),
+            (0.214080585764866, 0.353216867533926, 0.3650014330955567, 0.47197667085082984,
+             0.5071647195850403, 0.5107899381039265, 0.563894415993932, 0.6150518764874886,
+             0.6461781982138443, 0.6483568369087811),
+            (0.21564852631365375, 0.3536024256611885, 0.3652692866946287, 0.4807484678430083,
+             0.5073352894281589, 0.5125343692391049, 0.6079200818245155, 0.6197842747116765,
+             0.648907835949042, 0.6503229392874306),
+            (0.21087876573006833, 0.35463024054783404, 0.3612449317676656, 0.43948603208371123,
+             0.5070218413172007, 0.508251630347181, 0.5438146806988851, 0.6205991881007313,
+             0.6465891122723096, 0.6511544851425487),
+            (0.16235265342991828, 0.2958744870280601, 0.3562142355919711, 0.37216060317897104,
+             0.5042580244528116, 0.5067350381508423, 0.5373546859406302, 0.6332312603115383,
+             0.6459156623195174, 0.6571698237808499),
+            (0.0, 0.2658849786929068, 0.3568523862640937, 0.36899013667229497, 0.5038968919421172,
+             0.506551858753244, 0.5399110559018708, 0.6356807846017583, 0.6458520213315968, 0.6600163321775416),
         ]
 
         if mpb.with_hermitian_epsilon():
             self.check_freqs(expected_freqs_with_herm_eps, ms.all_freqs)
         else:
             self.check_freqs(expected_freqs, ms.all_freqs)
+
+    def test_compute_integrals(self):
+        ms = self.init_solver()
+        ms.run_te()
+
+        def f1(u, eps, r):
+            return u * eps * r.dot(r)
+
+        def f2(F, eps, r):
+            return F.x * eps * r.dot(r)
+
+        mpb.fix_hfield_phase(ms, 8)
+        ms.get_hfield(8)
+        ms.compute_field_energy()
+
+        energy_integral = ms.compute_energy_integral(f1)
+        self.assertAlmostEqual(energy_integral, 0.23065363598406974)
+
+        mpb.fix_efield_phase(ms, 8)
+        ms.get_efield(8)
+
+        field_integral = ms.compute_field_integral(f2)
+        self.assertAlmostEqual(field_integral, 02.0735366548785272e-18 - 3.0259168624899837e-6j)
+
+    def test_multiply_bloch_phase(self):
+        ms = self.init_solver()
+        ms.run_te()
+
+        mpb.fix_efield_phase(ms, 8)
+        efield = ms.get_efield(8, False)
+        bloch_efield = ms.multiply_bloch_phase(efield)
+
+        ref_fn = 'tutorial-e.k16.b08.te.h5'
+        ref_path = os.path.join(self.data_dir, ref_fn)
+        self.check_fields_against_h5(ref_path, bloch_efield)
+
+    def test_multiply_bloch_in_map_data(self):
+        ms = self.init_solver()
+
+        # multilpy_bloch_phase happens in get_efield
+        ms.run_te()
+        mpb.fix_efield_phase(ms, 8)
+        efield = ms.get_efield(8)
+        self.assertTrue(efield.bloch_phase)
+        md = mpb.MPBData(rectify=True, resolution=32, periods=3)
+        result1 = md.convert(efield)
+
+        # multiply_bloch_phase happens in map_data
+        ms.run_te()
+        mpb.fix_efield_phase(ms, 8)
+        efield_no_bloch = ms.get_efield(8, False)
+        self.assertFalse(efield_no_bloch.bloch_phase)
+        md = mpb.MPBData(rectify=True, resolution=32, periods=3)
+        result2 = md.convert(efield_no_bloch)
+
+        compare_arrays(self, result1, result2, tol=1e-7)
+
+    def test_poynting(self):
+        ms = self.init_solver()
+
+        ms.run_te(mpb.output_at_kpoint(mp.Vector3(0.5, 0.5), mpb.output_poynting))
+
+        ref_fn = 'tutorial-flux.v.k11.b08.te.h5'
+        ref_path = os.path.join(self.data_dir, ref_fn)
+        res_path = re.sub('tutorial', self.filename_prefix, ref_fn)
+
+        self.compare_h5_files(ref_path, res_path)
+
+    def test_fractional_lattice(self):
+
+        ms = self.init_solver()
+        ms.geometry_lattice.size = mp.Vector3(0.1, 0.1)
+        ms.run_te()
+
+        expected_brd = [
+            ((0.0, mp.Vector3(0.0, 0.0, 0.0)), (2.041241452319313, mp.Vector3(0.5, 0.5, 0.0))),
+            ((1.4433756729740665, mp.Vector3(0.5, 0.0, 0.0)), (2.886751345948131, mp.Vector3(0.0, 0.0, 0.0))),
+            ((2.041241452319316, mp.Vector3(0.5, 0.5, 0.0)), (3.2274861218395094, mp.Vector3(0.5, 0.0, 0.0))),
+            ((2.0412414523193187, mp.Vector3(0.5, 0.5, 0.0)), (3.2659863237109055, mp.Vector3(0.2, 0.2, 0.0))),
+            ((2.88675134594813, mp.Vector3(0.0, 0.0, 0.0)), (4.564354645876381, mp.Vector3(0.5, 0.5, 0.0))),
+            ((3.227486121839514, mp.Vector3(0.5, 0.0, 0.0)), (4.564354645876382, mp.Vector3(0.5, 0.5, 0.0))),
+            ((3.6968455021364752, mp.Vector3(0.20000000000000004, 0.0, 0.0)), (4.564354645876384, mp.Vector3(0.5, 0.5, 0.0))),
+            ((4.0824829046386295, mp.Vector3(0.0, 0.0, 0.0)), (5.204164998665332, mp.Vector3(0.5, 0.0, 0.0))),
+        ]
+
+        self.check_band_range_data(expected_brd, ms.band_range_data)
 
 
 if __name__ == '__main__':

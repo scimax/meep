@@ -1,3 +1,5 @@
+
+
 /* Copyright (C) 2005-2017 Massachusetts Institute of Technology
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -44,8 +46,10 @@
 %warnfilter(509) meep::symmetry::transform;
 %warnfilter(509) meep::symmetry::phase_shift;
 %warnfilter(509) meep::structure::structure;
+%warnfilter(509) meep::fields::get_eigenmode_coefficients;
 %warnfilter(451) meep::structure::outdir;
 %warnfilter(451) meep::fields_chunk::outdir;
+%warnfilter(325) meep::h5file::extending_s;
 
 // Renaming python builtins
 %rename(meep_type) meep::type;
@@ -60,6 +64,7 @@
 %rename(__getitem__) meep::grid_volume::operator[];
 %rename(symmetry_assign) meep::symmetry::operator=;
 
-%rename(vec_from_dim) meep::vec::vec(ndim, double);
+%rename(vec_dim_val) meep::vec::vec(ndim, double);
+%rename(vec_dim) meep::vec::vec(ndim);
 
 %include "meep/vec.hpp"

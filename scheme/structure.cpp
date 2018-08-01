@@ -28,9 +28,9 @@ void sym_matrix_rotate(symmetric_matrix *RAR,
      A[0][1] = A[1][0] = A_->m01;
      A[0][2] = A[2][0] = A_->m02;
      A[1][2] = A[2][1] = A_->m12;
-     for (i = 0; i < 3; ++i) for (j = 0; j < 3; ++j) 
+     for (i = 0; i < 3; ++i) for (j = 0; j < 3; ++j)
 	  AR[i][j] = A[i][0]*R[0][j] + A[i][1]*R[1][j] + A[i][2]*R[2][j];
-     for (i = 0; i < 3; ++i) for (j = i; j < 3; ++j) 
+     for (i = 0; i < 3; ++i) for (j = i; j < 3; ++j)
 	  A[i][j] = R[0][i]*AR[0][j] + R[1][i]*AR[1][j] + R[2][i]*AR[2][j];
      RAR->m00 = A[0][0];
      RAR->m11 = A[1][1];
@@ -41,7 +41,7 @@ void sym_matrix_rotate(symmetric_matrix *RAR,
 }
 
 /* Set Vinv = inverse of V, where both V and Vinv are real-symmetric matrices.*/
-void sym_matrix_invert(symmetric_matrix *Vinv, 
+void sym_matrix_invert(symmetric_matrix *Vinv,
 			       const symmetric_matrix *V)
 {
      double m00 = V->m00, m11 = V->m11, m22 = V->m22;
@@ -56,19 +56,19 @@ void sym_matrix_invert(symmetric_matrix *Vinv,
      }
      else {
 	  double detinv;
-	  
+
 	  /* compute the determinant: */
 	  detinv = m00*m11*m22 - m02*m11*m02 + 2.0 * m01*m12*m02 -
 	       m01*m01*m22 - m12*m12*m00;
-	  
+
 	  if (detinv == 0.0) meep::abort( "singular 3x3 matrix");
-	  
+
 	  detinv = 1.0/detinv;
-	  
+
 	  Vinv->m00 = detinv * (m11*m22 - m12*m12);
 	  Vinv->m11 = detinv * (m00*m22 - m02*m02);
 	  Vinv->m22 = detinv * (m11*m00 - m01*m01);
-	  
+
 	  Vinv->m02 = detinv * (m01*m12 - m11*m02);
 	  Vinv->m01 = detinv * (m12*m02 - m01*m22);
 	  Vinv->m12 = detinv * (m01*m02 - m00*m12);
@@ -94,7 +94,7 @@ int sym_matrix_positive_definite(symmetric_matrix *V)
      det2 = m00*m11 - m01*m01;
      det3 = det2*m22 - m02*m11*m02 + 2.0 * m01*m12*m02 - m12*m12*m00;
 #endif /* real matrix */
-     
+
      return (m00 > 0.0 && det2 > 0.0 && det3 > 0.0);
 }
 
@@ -117,7 +117,7 @@ void set_dimensions(int dims)
 vector3 vec_to_vector3(const meep::vec &pt)
 {
   vector3 v3;
-  
+
   switch (pt.dim) {
   case meep::D1:
     v3.x = 0;
@@ -172,7 +172,7 @@ static geom_box gv2box(const meep::volume &v)
 /***********************************************************************/
 
 static meep::realnum *epsilon_data = NULL;
-static int epsilon_dims[3] = {0,0,0};
+static size_t epsilon_dims[3] = {0,0,0};
 
 static void read_epsilon_file(const char *eps_input_file)
 {
@@ -187,61 +187,10 @@ static void read_epsilon_file(const char *eps_input_file)
     meep::h5file eps_file(fname, meep::h5file::READONLY, false);
     int rank; // ignored since rank < 3 is equivalent to singleton dims
     epsilon_data = eps_file.read(dataname, &rank, epsilon_dims, 3);
-    master_printf("read in %dx%dx%d epsilon-input-file \"%s\"\n",
+    master_printf("read in %zdx%zdx%zd epsilon-input-file \"%s\"\n",
 		  epsilon_dims[0], epsilon_dims[1], epsilon_dims[2],
 		  eps_input_file);
   }
-}
-
-/* Linearly interpolate a given point in a 3d grid of data.  The point
-   coordinates should be in the range [0,1], or at the very least [-1,2]
-   ... anything outside [0,1] is *mirror* reflected into [0,1] */
-static meep::realnum linear_interpolate(
-		     meep::realnum rx, meep::realnum ry, meep::realnum rz,
-		     meep::realnum *data, int nx, int ny, int nz, int stride)
-{
-     int x, y, z, x2, y2, z2;
-     meep::realnum dx, dy, dz;
-
-     /* mirror boundary conditions for r just beyond the boundary */
-     if (rx < 0.0) rx = -rx; else if (rx > 1.0) rx = 1.0 - rx;
-     if (ry < 0.0) ry = -ry; else if (ry > 1.0) ry = 1.0 - ry;
-     if (rz < 0.0) rz = -rz; else if (rz > 1.0) rz = 1.0 - rz;
-
-     /* get the point corresponding to r in the epsilon array grid: */
-     x = rx * nx; if (x == nx) --x;
-     y = ry * ny; if (y == ny) --y;
-     z = rz * nz; if (z == nz) --z;
-
-     /* get the difference between (x,y,z) and the actual point
-        ... we shift by 0.5 to center the data points in the pixels */
-     dx = rx * nx - x - 0.5;
-     dy = ry * ny - y - 0.5;
-     dz = rz * nz - z - 0.5;
-
-     /* get the other closest point in the grid, with mirror boundaries: */
-     x2 = (dx >= 0.0 ? x + 1 : x - 1);
-     if (x2 < 0) x2++; else if (x2 == nx) x2--;
-     y2 = (dy >= 0.0 ? y + 1 : y - 1);
-     if (y2 < 0) y2++; else if (y2 == ny) y2--;
-     z2 = (dz >= 0.0 ? z + 1 : z - 1);
-     if (z2 < 0) z2++; else if (z2 == nz) z2--;
-
-     /* take abs(d{xyz}) to get weights for {xyz} and {xyz}2: */
-     dx = fabs(dx);
-     dy = fabs(dy);
-     dz = fabs(dz);
-
-     /* define a macro to give us data(x,y,z) on the grid,
-	in row-major order (the order used by HDF5): */
-#define D(x,y,z) (data[(((x)*ny + (y))*nz + (z)) * stride])
-
-     return(((D(x,y,z)*(1.0-dx) + D(x2,y,z)*dx) * (1.0-dy) +
-	     (D(x,y2,z)*(1.0-dx) + D(x2,y2,z)*dx) * dy) * (1.0-dz) +
-	    ((D(x,y,z2)*(1.0-dx) + D(x2,y,z2)*dx) * (1.0-dy) +
-	     (D(x,y2,z2)*(1.0-dx) + D(x2,y2,z2)*dx) * dy) * dz);
-
-#undef D
 }
 
 // return material of the point p from the file (assumed already read)
@@ -252,15 +201,15 @@ static void epsilon_file_material(material_type &m, vector3 p)
   if (m.which_subclass != MTS::MEDIUM)
     meep::abort("epsilon-input-file only works with a type=medium default-material");
   medium *mm = m.subclass.medium_data;
-  double rx = geometry_lattice.size.x == 0 
+  double rx = geometry_lattice.size.x == 0
     ? 0 : 0.5 + (p.x-geometry_center.x) / geometry_lattice.size.x;
-  double ry = geometry_lattice.size.y == 0 
+  double ry = geometry_lattice.size.y == 0
     ? 0 : 0.5 + (p.y-geometry_center.y) / geometry_lattice.size.y;
-  double rz = geometry_lattice.size.z == 0 
+  double rz = geometry_lattice.size.z == 0
     ? 0 : 0.5 + (p.z-geometry_center.z) / geometry_lattice.size.z;
-  mm->epsilon_diag.x = mm->epsilon_diag.y = mm->epsilon_diag.z = 
-    linear_interpolate(rx, ry, rz, epsilon_data,
-		       epsilon_dims[0], epsilon_dims[1], epsilon_dims[2], 1);
+  mm->epsilon_diag.x = mm->epsilon_diag.y = mm->epsilon_diag.z =
+    meep::linear_interpolate(rx, ry, rz, epsilon_data,
+                             epsilon_dims[0], epsilon_dims[1], epsilon_dims[2], 1);
   mm->epsilon_offdiag.x = mm->epsilon_offdiag.y = mm->epsilon_offdiag.z = 0;
 }
 
@@ -283,9 +232,9 @@ class geom_epsilon : public meep::material_function {
   geometric_object_list geometry;
   geom_box_tree geometry_tree;
   geom_box_tree restricted_tree;
-    
+
   cond_profile cond[5][2]; // [direction][side]
-  
+
 public:
   geom_epsilon(geometric_object_list g, material_type_list mlist,
 	       const meep::volume &v);
@@ -295,7 +244,7 @@ public:
                                 double L, double dx,
                                 double (*prof)(int,double*,void*), void*,
                                 double R);
-  
+
   virtual void set_volume(const meep::volume &v);
   virtual void unset_volume(void);
 
@@ -311,7 +260,7 @@ public:
 
   virtual double chi1p1(meep::field_type ft, const meep::vec &r);
   virtual void eff_chi1inv_row(meep::component c, double chi1inv_row[3],
-			       const meep::volume &v, 
+			       const meep::volume &v,
 			       double tol, int maxeval);
 
   void fallback_chi1inv_row(meep::component c, double chi1inv_row[3],
@@ -342,8 +291,8 @@ geom_epsilon::geom_epsilon(geometric_object_list g, material_type_list mlist,
   if (meep::am_master()) {
     for (int i = 0; i < geometry.num_items; ++i) {
       display_geometric_object_info(5, geometry.items[i]);
-      
-      if (geometry.items[i].material.which_subclass 
+
+      if (geometry.items[i].material.which_subclass
 	  == MTS::MEDIUM)
 	printf("%*sdielectric constant epsilon diagonal = (%g,%g,%g)\n",
 	       5 + 5, "",
@@ -355,21 +304,21 @@ geom_epsilon::geom_epsilon(geometric_object_list g, material_type_list mlist,
 	       subclass.medium_data->epsilon_diag.z);
     }
   }
-  
+
   geom_fix_objects0(geometry);
   geom_box box = gv2box(v);
   geometry_tree = create_geom_box_tree0(geometry, box);
   if (verbose && meep::am_master()) {
     printf("Geometric-object bounding-box tree:\n");
     display_geom_box_tree(5, geometry_tree);
-    
+
     int tree_depth, tree_nobjects;
     geom_box_tree_stats(geometry_tree, &tree_depth, &tree_nobjects);
     master_printf("Geometric object tree has depth %d "
 		  "and %d object nodes (vs. %d actual objects)\n",
 		  tree_depth, tree_nobjects, geometry.num_items);
   }
-  
+
   restricted_tree = geometry_tree;
 }
 
@@ -382,7 +331,7 @@ geom_epsilon::~geom_epsilon()
 }
 
 void geom_epsilon::set_cond_profile(meep::direction dir,
-                                    meep::boundary_side side, 
+                                    meep::boundary_side side,
                                     double L, double dx,
                                     double (*P)(int,double*,void*), void *data,
                                     double R)
@@ -417,7 +366,7 @@ void geom_epsilon::unset_volume(void)
 void geom_epsilon::set_volume(const meep::volume &v)
 {
   unset_volume();
-  
+
   geom_box box = gv2box(v);
   restricted_tree = create_geom_box_tree0(geometry, box);
 }
@@ -427,13 +376,13 @@ static material_type eval_material_func(function material_func, vector3 p)
   SCM pscm = ctl_convert_vector3_to_scm(p);
   material_type material;
   SCM mo;
-  
+
   mo = gh_call1(material_func, pscm);
   material_type_input(mo, &material);
-  
+
   while (material.which_subclass == MTS::MATERIAL_FUNCTION) {
     material_type m;
-    
+
     mo = gh_call1(material.subclass.
 		  material_function_data->material_func,
 		  pscm);
@@ -441,13 +390,13 @@ static material_type eval_material_func(function material_func, vector3 p)
     material_type_destroy(material);
     material = m;
   }
-  
+
   if (material.which_subclass == MTS::MATERIAL_TYPE_SELF) {
     epsilon_file_material(material, p);
   }
   CK(material.which_subclass != MTS::MATERIAL_FUNCTION,
      "infinite loop in material functions");
-  
+
   return material;
 }
 
@@ -481,7 +430,7 @@ static bool is_metal(meep::field_type ft, const material_type *material) {
   }
 }
 
-static void material_epsmu(meep::field_type ft, material_type material, 
+static void material_epsmu(meep::field_type ft, material_type material,
 		    symmetric_matrix *epsmu, symmetric_matrix *epsmu_inv) {
   if (ft == meep::E_stuff)
     switch (material.which_subclass) {
@@ -589,17 +538,17 @@ double geom_epsilon::chi1p1(meep::field_type ft, const meep::vec &r)
   material_type material;
   bool destroy_material = get_material_pt(material, r);
 
-  material_epsmu(ft, material, &chi1p1, &chi1p1_inv);  
-  
+  material_epsmu(ft, material, &chi1p1, &chi1p1_inv);
+
   if (destroy_material)
     material_type_destroy(material);
-  
+
   return (chi1p1.m00 + chi1p1.m11 + chi1p1.m22)/3;
 }
 
 /* Find frontmost object in v, along with the constant material behind it.
    Returns false if material behind the object is not constant.
-   
+
    Requires moderately horrifying logic to figure things out properly,
    stolen from MPB. */
 static bool get_front_object(const meep::volume &v,
@@ -625,7 +574,7 @@ static bool get_front_object(const meep::volume &v,
     { {0,0,0},
       {1,1,1},{1,1,-1},{1,-1,1},{1,-1,-1},
       {-1,1,1},{-1,1,-1},{-1,-1,1},{-1,-1,-1} }
-  }; 
+  };
   pixel = gv2box(v);
   pcenter = p = vec_to_vector3(v.center());
   double d1, d2, d3;
@@ -653,14 +602,14 @@ static bool get_front_object(const meep::volume &v,
       mat1 = mat;
     }
     else if (id2 == -1 || ((id >= id1 && id >= id2) &&
-			   (id1 == id2 
+			   (id1 == id2
 			    || material_type_equal(&mat1,&mat2)))) {
       o2 = o;
       shiftby2 = shiftby;
       id2 = id;
       mat2 = mat;
     }
-    else if (!(id1 < id2 && 
+    else if (!(id1 < id2 &&
 	       (id1 == id || material_type_equal(&mat1,&mat))) &&
 	     !(id2 < id1 &&
 	       (id2 == id || material_type_equal(&mat2,&mat))))
@@ -711,7 +660,7 @@ void geom_epsilon::eff_chi1inv_row(meep::component c, double chi1inv_row[3],
 					p, &o, shiftby, mat, mat_behind)) {
   noavg:
     destroy_material = get_material_pt(mat, v.center());
-  trivial:    
+  trivial:
     material_epsmu(meep::type(c), mat, &meps, &meps_inv);
     switch (component_direction(c)) {
     case meep::X: case meep::R:
@@ -757,7 +706,7 @@ void geom_epsilon::eff_chi1inv_row(meep::component c, double chi1inv_row[3],
   pixel.low = vector3_minus(pixel.low, shiftby);
   pixel.high = vector3_minus(pixel.high, shiftby);
 
-  double fill = box_overlap_with_object(pixel, *o, tol, maxeval); 
+  double fill = box_overlap_with_object(pixel, *o, tol, maxeval);
 
   material_epsmu(meep::type(c), mat, &meps, &meps_inv);
   symmetric_matrix eps2, epsinv2;
@@ -827,7 +776,7 @@ void geom_epsilon::eff_chi1inv_row(meep::component c, double chi1inv_row[3],
 
 #undef SQR
 
-#define SWAP(a,b) { double xxx = a; a = b; b = xxx; }	  
+#define SWAP(a,b) { double xxx = a; a = b; b = xxx; }
 	  /* invert rotation matrix = transpose */
 	  SWAP(Rot[0][1], Rot[1][0]);
 	  SWAP(Rot[0][2], Rot[2][0]);
@@ -918,14 +867,14 @@ void geom_epsilon::fallback_chi1inv_row(meep::component c,
   if (destroy_material)
     material_type_destroy(material);
   if (chi1p1.m01 != 0 || chi1p1.m02 != 0 || chi1p1.m12 != 0
-      || chi1p1.m00 != chi1p1.m11 || chi1p1.m11 != chi1p1.m22 || 
+      || chi1p1.m00 != chi1p1.m11 || chi1p1.m11 != chi1p1.m22 ||
       chi1p1.m00 != chi1p1.m22) {
     int rownum = meep::component_direction(c) % 3;
     if (rownum == 0) {
       chi1inv_row[0] = chi1p1.m00;
       chi1inv_row[1] = chi1p1.m01;
       chi1inv_row[2] = chi1p1.m02;
-    } 
+    }
     else if (rownum == 1) {
       chi1inv_row[0] = chi1p1.m01;
       chi1inv_row[1] = chi1p1.m11;
@@ -945,7 +894,7 @@ void geom_epsilon::fallback_chi1inv_row(meep::component c,
   vector3 gvmin, gvmax;
   gvmin = vec_to_vector3(v.get_min_corner());
   gvmax = vec_to_vector3(v.get_max_corner());
-  xmin[0] = gvmin.x; xmax[0] = gvmax.x; 
+  xmin[0] = gvmin.x; xmax[0] = gvmax.x;
   if (dim == meep::Dcyl) {
     xmin[1] = gvmin.z; xmin[2] = gvmin.y; xmax[1] = gvmax.z; xmax[2] = gvmax.y;
   }
@@ -1006,7 +955,7 @@ bool geom_epsilon::has_chi3(meep::component c)
   for (int i = 0; i < geometry.num_items; ++i) {
     if (geometry.items[i].material.which_subclass == MTS::MEDIUM) {
       if (get_chi3(c, geometry.items[i].material.subclass.medium_data) != 0)
-	return true; 
+	return true;
     }
   }
   for (int i = 0; i < extra_materials.num_items; ++i)
@@ -1020,7 +969,7 @@ bool geom_epsilon::has_chi3(meep::component c)
 double geom_epsilon::chi3(meep::component c, const meep::vec &r) {
   material_type material;
   bool destroy_material = get_material_pt(material, r);
-  
+
   double chi3_val;
   switch (material.which_subclass) {
   case MTS::MEDIUM:
@@ -1029,10 +978,10 @@ double geom_epsilon::chi3(meep::component c, const meep::vec &r) {
   default:
     chi3_val = 0;
   }
-  
+
   if (destroy_material)
     material_type_destroy(material);
-  
+
   return chi3_val;
 }
 
@@ -1053,7 +1002,7 @@ bool geom_epsilon::has_chi2(meep::component c)
   for (int i = 0; i < geometry.num_items; ++i) {
     if (geometry.items[i].material.which_subclass == MTS::MEDIUM) {
       if (get_chi2(c, geometry.items[i].material.subclass.medium_data) != 0)
-	return true; 
+	return true;
     }
   }
   for (int i = 0; i < extra_materials.num_items; ++i)
@@ -1067,7 +1016,7 @@ bool geom_epsilon::has_chi2(meep::component c)
 double geom_epsilon::chi2(meep::component c, const meep::vec &r) {
   material_type material;
   bool destroy_material = get_material_pt(material, r);
-  
+
   double chi2_val;
   switch (material.which_subclass) {
   case MTS::MEDIUM:
@@ -1076,10 +1025,10 @@ double geom_epsilon::chi2(meep::component c, const meep::vec &r) {
   default:
     chi2_val = 0;
   }
-  
+
   if (destroy_material)
     material_type_destroy(material);
-  
+
   return chi2_val;
 }
 
@@ -1098,7 +1047,7 @@ bool geom_epsilon::has_mu()
 {
   for (int i = 0; i < geometry.num_items; ++i) {
     if (mu_not_1(geometry.items[i].material))
-      return true; 
+      return true;
   }
   for (int i = 0; i < extra_materials.num_items; ++i)
     if (mu_not_1(extra_materials.items[i]))
@@ -1130,7 +1079,7 @@ bool geom_epsilon::has_conductivity(meep::component c)
   for (int i = 0; i < geometry.num_items; ++i) {
     if (geometry.items[i].material.which_subclass == MTS::MEDIUM) {
       if (get_cnd(c, geometry.items[i].material.subclass.medium_data) != 0)
-	return true; 
+	return true;
     }
   }
   for (int i = 0; i < extra_materials.num_items; ++i)
@@ -1153,7 +1102,7 @@ double geom_epsilon::conductivity(meep::component c, const meep::vec &r) {
   default:
     cond_val = 0;
   }
-  
+
   if (destroy_material)
     material_type_destroy(material);
 
@@ -1188,14 +1137,14 @@ double geom_epsilon::conductivity(meep::component c, const meep::vec &r) {
           }
       }
   }
-  
+
   return cond_val;
 }
 
 /* like susceptibility_equal in ctl-io.cpp, but ignores sigma and id
    (must be updated manually, re-copying from ctl-io.cpp), if we
    add new susceptibility subclasses) */
-static bool susceptibility_equiv(const susceptibility *o0, 
+static bool susceptibility_equiv(const susceptibility *o0,
 				 const susceptibility *o)
 {
 if (o0->which_subclass != o->which_subclass) return 0;
@@ -1213,14 +1162,14 @@ if (!lorentzian_susceptibility_equal(o0->subclass.lorentzian_susceptibility_data
 return 1;
 }
 
-void geom_epsilon::sigma_row(meep::component c, double sigrow[3], 
+void geom_epsilon::sigma_row(meep::component c, double sigrow[3],
 			     const meep::vec &r) {
   vector3 p = vec_to_vector3(r);
 
   boolean inobject;
   material_type material =
     material_of_unshifted_point_in_tree_inobject(p, restricted_tree, &inobject);
-  
+
   int destroy_material = 0;
   if (material.which_subclass == MTS::MATERIAL_TYPE_SELF) {
     material = default_material;
@@ -1231,10 +1180,10 @@ void geom_epsilon::sigma_row(meep::component c, double sigrow[3],
 				  p);
     destroy_material = 1;
   }
-  
+
   sigrow[0] = sigrow[1] = sigrow[2] = 0.0;
   if (material.which_subclass == MTS::MEDIUM) {
-    susceptibility_list slist = 
+    susceptibility_list slist =
       type(c) == meep::E_stuff
       ? material.subclass.medium_data->E_susceptibilities
       : material.subclass.medium_data->H_susceptibilities;
@@ -1261,7 +1210,7 @@ void geom_epsilon::sigma_row(meep::component c, double sigrow[3],
 	break;
       }
   }
-  
+
   if (destroy_material)
     material_type_destroy(material);
 }
@@ -1375,7 +1324,7 @@ void geom_epsilon::add_susceptibilities(meep::structure *s) {
   add_susceptibilities(meep::H_stuff, s);
 }
 
-void geom_epsilon::add_susceptibilities(meep::field_type ft, 
+void geom_epsilon::add_susceptibilities(meep::field_type ft,
 					meep::structure *s) {
   pol *pols = 0;
 
@@ -1399,7 +1348,7 @@ void geom_epsilon::add_susceptibilities(meep::field_type ft,
     pols = add_pols(pols, ft == meep::E_stuff
 		    ? default_material.subclass.medium_data->E_susceptibilities
 		  : default_material.subclass.medium_data->H_susceptibilities);
-    
+
   for (struct pol *p = pols; p; p = p->next) {
     meep::susceptibility *sus = NULL;
     switch (p->user_s.which_subclass) {
@@ -1453,7 +1402,7 @@ void geom_epsilon::add_susceptibilities(meep::field_type ft,
     }
   }
   current_pol = NULL;
-  
+
   while (pols) {
     struct pol *p = pols;
     pols = pols->next;
@@ -1500,14 +1449,14 @@ meep::structure *make_structure(int dims, vector3 size, vector3 center,
 				double global_B_conductivity_)
 {
   master_printf("-----------\nInitializing structure...\n");
-  
+
   // only cartesian lattices are currently allowed
   geom_initialize();
   geometry_center = center;
 
   global_D_conductivity = global_D_conductivity_;
   global_B_conductivity = global_B_conductivity_;
-  
+
   number no_size = 2.0 / ctl_get_number("infinity");
   if (size.x <= no_size)
     size.x = 0.0;
@@ -1515,15 +1464,15 @@ meep::structure *make_structure(int dims, vector3 size, vector3 center,
     size.y = 0.0;
   if (size.z <= no_size)
     size.z = 0.0;
-  
+
   set_dimensions(dims);
-  
+
   geometry_lattice.size = size;
   geometry_edge = vector3_to_vec(size) * 0.5;
 
   master_printf("Working in %s dimensions.\n", meep::dimension_name(dim));
   master_printf("Computational cell is %g x %g x %g with resolution %g\n",
-                size.x, size.y, size.z, resolution);  
+                size.x, size.y, size.z, resolution);
 
   meep::grid_volume gv;
   switch (dims) {
@@ -1544,9 +1493,9 @@ meep::structure *make_structure(int dims, vector3 size, vector3 center,
   }
   gv.center_origin();
   gv.shift_origin(vector3_to_vec(center));
-  
+
   meep::symmetry S;
-  for (int i = 0; i < symmetries.num_items; ++i) 
+  for (int i = 0; i < symmetries.num_items; ++i)
     switch (symmetries.items[i].which_subclass) {
     case symmetry::SYMMETRY_SELF: break; // identity
     case symmetry::MIRROR_SYM:
@@ -1645,7 +1594,7 @@ meep::structure *make_structure(int dims, vector3 size, vector3 center,
 	     (meep::boundary_side) pml_layers.items[i].side);
     }
   }
-  
+
   ensure_periodicity = ensure_periodicity_p;
   default_material = default_mat;
   read_epsilon_file(eps_input_file);
@@ -1692,7 +1641,7 @@ meep::structure *make_structure(int dims, vector3 size, vector3 center,
 
   if (subpixel_maxeval < 0) subpixel_maxeval = 0; // no limit
 
-  meep::structure *s = new meep::structure(gv, geps, br, S, 
+  meep::structure *s = new meep::structure(gv, geps, br, S,
 					   num_chunks, Courant,
 					   enable_averaging,
 					   subpixel_tol,
@@ -1701,7 +1650,7 @@ meep::structure *make_structure(int dims, vector3 size, vector3 center,
   geps.add_susceptibilities(s);
 
   master_printf("-----------\n");
-  
+
   return s;
 }
 
